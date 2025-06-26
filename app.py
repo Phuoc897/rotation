@@ -80,7 +80,7 @@ def givens_3d(theta, axis='z'):
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 def rotate_image_2d(image, angle_deg):
-    """Xoay ảnh 2D bằng Givens rotation quanh tâm"""
+    """Xoay ảnh 2D bằng Givens rotation"""
     theta = np.radians(angle_deg)
     c = np.cos(theta)
     s = np.sin(theta)
@@ -101,6 +101,93 @@ def rotate_image_2d(image, angle_deg):
         fillcolor='white'
     )
 
+def givens_3d(angle, axis):
+    """Tạo ma trận rotation 3D cho trục x, y, z"""
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    
+    if axis == 'x':
+        return np.array([
+            [1, 0, 0],
+            [0, cos_a, -sin_a],
+            [0, sin_a, cos_a]
+        ])
+    elif axis == 'y':
+        return np.array([
+            [cos_a, 0, sin_a],
+            [0, 1, 0],
+            [-sin_a, 0, cos_a]
+        ])
+    elif axis == 'z':
+        return np.array([
+            [cos_a, -sin_a, 0],
+            [sin_a, cos_a, 0],
+            [0, 0, 1]
+        ])
+
+def create_3d_mesh(image, depth_scale=20, resolution=50):
+    """Tạo mesh 3D cải tiến từ ảnh với chất lượng cao hơn"""
+    # Resize ảnh với phương pháp LANCZOS để giữ chất lượng
+    img_small = image.resize((resolution, resolution), Image.Resampling.LANCZOS)
+    img_array = np.array(img_small)
+    
+    # Tạo depth map từ brightness với smooth filter
+    if len(img_array.shape) == 3:
+        # Sử dụng weighted average cho RGB
+        depth = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
+    else:
+        depth = img_array.copy()
+    
+    # Áp dụng Gaussian blur để smooth depth map
+    depth = gaussian_blur(depth, sigma=0.😎
+    
+    # Normalize depth với scaling tốt hơn
+    depth_normalized = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
+    depth_final = depth_normalized * (depth_scale / 100.0)
+    
+    # Tạo vertices với spacing đều
+    vertices = []
+    colors = []
+    faces = []
+    
+    h, w = depth_final.shape
+    
+    # Scale factor cho tọa độ x, y
+    scale_x = 2.0 / (w - 1)
+    scale_y = 2.0 / (h - 1)
+    
+    for y in range(h):
+        for x in range(w):
+            # Tọa độ 3D với center tại (0,0)
+            vertex_x = (x * scale_x) - 1.0
+            vertex_y = 1.0 - (y * scale_y)  # Flip Y để match image orientation
+            vertex_z = depth_final[y, x]
+            
+            vertices.append([vertex_x, vertex_y, vertex_z])
+            
+            # Màu từ ảnh gốc với interpolation
+            if len(img_array.shape) == 3:
+                colors.append(img_array[y, x] / 255.0)
+            else:
+                gray = img_array[y, x] / 255.0
+                colors.append([gray, gray, gray])
+    
+    # Tạo faces với kiểm tra bounds
+    for y in range(h-1):
+        for x in range(w-1):
+            # Chỉ số vertices
+            i1 = y * w + x
+            i2 = y * w + (x + 1)
+            i3 = (y + 1) * w + x
+            i4 = (y + 1) * w + (x + 1)
+            
+            # Kiểm tra bounds
+            if i4 < len(vertices):
+                # Hai triangles cho mỗi quad với winding order đúng
+                faces.append([i1, i2, i3])  # Triangle 1
+                faces.append([i2, i4, i3])  # Triangle 2
+    
+    return np.array(vertices), np.array(colors), np.array(faces), (h, w)
 
 def gaussian_blur(image, sigma=1.0):
     """Áp dụng Gaussian blur đơn giản"""
@@ -297,7 +384,7 @@ def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, 
                 
                 # Convert to tuple
                 fill_color = tuple(final_color)
-                outline_color = tuple((final_color * 0.8).astype(int))
+                outline_color = tuple((final_color * 0.😎.astype(int))
                 
                 # Render triangle
                 try:
@@ -658,6 +745,37 @@ def generate_interactive_3d_html(vertices, colors, faces, mesh_size):
     """
     
     return html_code
+
+# Hàm chính để test
+def process_image_to_3d(image_path, rotation_x=0, rotation_y=0, rotation_z=0):
+    """Xử lý ảnh thành 3D mesh với các cải tiến"""
+    
+    # Load image
+    image = Image.open(image_path).convert('RGB')
+    
+    # Tạo mesh 3D
+    vertices, colors, faces, mesh_size = create_3d_mesh(image, depth_scale=15, resolution=60)
+    
+    # Áp dụng rotation
+    if rotation_x != 0 or rotation_y != 0 or rotation_z != 0:
+        vertices, rotation_matrix = apply_3d_rotation(vertices, rotation_x, rotation_y, rotation_z)
+    
+    # Project 3D to 2D
+    projected, z_values = project_3d_to_2d(vertices, distance=4.5, fov=50)
+    
+    # Render 2D image
+    rendered_img = render_3d_mesh_advanced(vertices, colors, faces, projected, z_values)
+    
+    # Tạo HTML interactive
+    html_content = generate_interactive_3d_html(vertices, colors, faces, mesh_size)
+    
+    return rendered_img, html_content
+
+# Example usage:
+# rendered_image, html_code = process_image_to_3d("your_image.jpg", 
+#                                                rotation_x=15, 
+#                                                rotation_y=25, 
+#                                                rotation_z=0)
 
 # =================== MAIN APP ===================
 
