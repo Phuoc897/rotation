@@ -1,4 +1,4 @@
-# chỉnh code ảnh 2D lại chỉ xoay quanh tâm như bth thoy , còn 3d bỏ các hàm tách các điểm ảnh pixel ra chỉ xoay givens 3d thoy
+# chỉnh code ảnh 2D lại chỉ xoay quanh tâm như bth thoy , còn 3d bỏ các hàm tách các điểm ảnh pixel ra chỉ xoay givens 3d thoy , ảnh 3D nó bị  tách ra nhỏ v
 import streamlit as st
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
