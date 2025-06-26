@@ -100,44 +100,78 @@ def rotate_image_2d(image, angle_deg):
         fillcolor='white'
     )
 
-def create_3d_mesh(image, depth_scale=30, resolution=40):
-    """Tạo mesh 3D đơn giản từ ảnh"""
-    # Resize ảnh
-    img_small = image.resize((resolution, resolution))
+def givens_3d(angle, axis):
+    """Tạo ma trận rotation 3D cho trục x, y, z"""
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    
+    if axis == 'x':
+        return np.array([
+            [1, 0, 0],
+            [0, cos_a, -sin_a],
+            [0, sin_a, cos_a]
+        ])
+    elif axis == 'y':
+        return np.array([
+            [cos_a, 0, sin_a],
+            [0, 1, 0],
+            [-sin_a, 0, cos_a]
+        ])
+    elif axis == 'z':
+        return np.array([
+            [cos_a, -sin_a, 0],
+            [sin_a, cos_a, 0],
+            [0, 0, 1]
+        ])
+
+def create_3d_mesh(image, depth_scale=20, resolution=50):
+    """Tạo mesh 3D cải tiến từ ảnh với chất lượng cao hơn"""
+    # Resize ảnh với phương pháp LANCZOS để giữ chất lượng
+    img_small = image.resize((resolution, resolution), Image.Resampling.LANCZOS)
     img_array = np.array(img_small)
     
-    # Tạo depth map từ brightness
+    # Tạo depth map từ brightness với smooth filter
     if len(img_array.shape) == 3:
-        depth = np.mean(img_array, axis=2)
+        # Sử dụng weighted average cho RGB
+        depth = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
     else:
-        depth = img_array
+        depth = img_array.copy()
     
-    # Normalize depth
-    depth = depth / 255.0 * depth_scale / 100
+    # Áp dụng Gaussian blur để smooth depth map
+    depth = gaussian_blur(depth, sigma=0.😎
     
-    # Tạo vertices
+    # Normalize depth với scaling tốt hơn
+    depth_normalized = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
+    depth_final = depth_normalized * (depth_scale / 100.0)
+    
+    # Tạo vertices với spacing đều
     vertices = []
     colors = []
     faces = []
     
-    h, w = depth.shape
+    h, w = depth_final.shape
+    
+    # Scale factor cho tọa độ x, y
+    scale_x = 2.0 / (w - 1)
+    scale_y = 2.0 / (h - 1)
+    
     for y in range(h):
         for x in range(w):
-            # Tọa độ 3D
-            vertex_x = (x - w/2) / w * 2
-            vertex_y = (y - h/2) / h * 2
-            vertex_z = depth[y, x]
+            # Tọa độ 3D với center tại (0,0)
+            vertex_x = (x * scale_x) - 1.0
+            vertex_y = 1.0 - (y * scale_y)  # Flip Y để match image orientation
+            vertex_z = depth_final[y, x]
             
             vertices.append([vertex_x, vertex_y, vertex_z])
             
-            # Màu từ ảnh
+            # Màu từ ảnh gốc với interpolation
             if len(img_array.shape) == 3:
                 colors.append(img_array[y, x] / 255.0)
             else:
                 gray = img_array[y, x] / 255.0
                 colors.append([gray, gray, gray])
     
-    # Tạo faces (triangles)
+    # Tạo faces với kiểm tra bounds
     for y in range(h-1):
         for x in range(w-1):
             # Chỉ số vertices
@@ -146,85 +180,184 @@ def create_3d_mesh(image, depth_scale=30, resolution=40):
             i3 = (y + 1) * w + x
             i4 = (y + 1) * w + (x + 1)
             
-            # Hai triangles cho mỗi quad
-            faces.append([i1, i2, i3])
-            faces.append([i2, i4, i3])
+            # Kiểm tra bounds
+            if i4 < len(vertices):
+                # Hai triangles cho mỗi quad với winding order đúng
+                faces.append([i1, i2, i3])  # Triangle 1
+                faces.append([i2, i4, i3])  # Triangle 2
     
     return np.array(vertices), np.array(colors), np.array(faces), (h, w)
 
+def gaussian_blur(image, sigma=1.0):
+    """Áp dụng Gaussian blur đơn giản"""
+    # Tạo kernel Gaussian
+    kernel_size = int(6 * sigma) + 1
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    
+    kernel = np.zeros((kernel_size, kernel_size))
+    center = kernel_size // 2
+    
+    for i in range(kernel_size):
+        for j in range(kernel_size):
+            x, y = i - center, j - center
+            kernel[i, j] = np.exp(-(x*x + y*y) / (2 * sigma * sigma))
+    
+    kernel = kernel / np.sum(kernel)
+    
+    # Áp dụng convolution
+    padded = np.pad(image, center, mode='edge')
+    result = np.zeros_like(image)
+    
+    for i in range(image.shape[0]):
+        for j in range(image.shape[1]):
+            result[i, j] = np.sum(padded[i:i+kernel_size, j:j+kernel_size] * kernel)
+    
+    return result
+
 def apply_3d_rotation(vertices, rx, ry, rz):
-    """Áp dụng rotation 3D"""
+    """Áp dụng rotation 3D với ma trận kết hợp"""
     # Chuyển sang radian
     rx_rad = np.radians(rx)
     ry_rad = np.radians(ry)
     rz_rad = np.radians(rz)
     
-    # Tạo ma trận rotation
+    # Tạo ma trận rotation cho từng trục
     Rx = givens_3d(rx_rad, 'x')
     Ry = givens_3d(ry_rad, 'y')
     Rz = givens_3d(rz_rad, 'z')
     
-    # Kết hợp rotation (Z * Y * X)
+    # Kết hợp rotation (Z * Y * X order)
     R = np.dot(Rz, np.dot(Ry, Rx))
     
-    # Áp dụng rotation
+    # Áp dụng rotation cho tất cả vertices
     rotated = np.dot(vertices, R.T)
     
     return rotated, R
 
-def project_3d_to_2d(vertices_3d, distance=3):
-    """Chiếu 3D lên 2D với perspective"""
+def project_3d_to_2d(vertices_3d, distance=4.0, fov=60):
+    """Chiếu 3D lên 2D với perspective projection cải tiến"""
     projected = []
     z_values = []
     
+    # Tính toán projection parameters
+    fov_rad = np.radians(fov)
+    f = 1.0 / np.tan(fov_rad / 2.0)
+    
     for vertex in vertices_3d:
         x, y, z = vertex
+        
+        # Dịch chuyển z để camera ở khoảng cách distance
         z_cam = z + distance
-        if z_cam > 0.1:  # Tránh chia cho 0
-            px = x / z_cam
-            py = y / z_cam
+        
+        # Perspective projection với clipping
+        if z_cam > 0.01:  # Near clipping plane
+            # Sử dụng proper perspective projection
+            px = (x * f) / z_cam
+            py = (y * f) / z_cam
         else:
+            # Clip vertices behind camera
             px, py = 0, 0
+            z_cam = 0.01
+            
         projected.append([px, py])
         z_values.append(z_cam)
     
     return np.array(projected), np.array(z_values)
 
-def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, image_size=600):
-    """Render mesh 3D với depth sorting và wireframe"""
-    img = Image.new('RGB', (image_size, image_size), (20, 25, 35))
+def calculate_face_normal(v1, v2, v3):
+    """Tính normal vector của face"""
+    edge1 = v2 - v1
+    edge2 = v3 - v1
+    normal = np.cross(edge1, edge2)
+    length = np.linalg.norm(normal)
+    if length > 0:
+        return normal / length
+    return np.array([0, 0, 1])
+
+def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, image_size=800):
+    """Render mesh 3D với improved shading và anti-aliasing"""
+    
+    # Tạo image với background gradient
+    img = Image.new('RGBA', (image_size, image_size), (15, 20, 30, 255))
     draw = ImageDraw.Draw(img)
     
-    # Scale tọa độ 2D
+    # Scale và center tọa độ 2D
     proj_scaled = projected_2d.copy()
+    
+    # Tìm bounds của projection
+    valid_mask = z_values > 0.01
+    if np.any(valid_mask):
+        valid_proj = projected_2d[valid_mask]
+        min_x, max_x = np.min(valid_proj[:, 0]), np.max(valid_proj[:, 0])
+        min_y, max_y = np.min(valid_proj[:, 1]), np.max(valid_proj[:, 1])
+        
+        # Scale để fit trong image với margin
+        margin = 0.1
+        scale_factor = min((1 - 2*margin) / (max_x - min_x), (1 - 2*margin) / (max_y - min_y))
+        scale_factor = min(scale_factor, 1.0)  # Không scale up quá 1.0
+        
+        # Center và scale
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        proj_scaled[:, 0] = (proj_scaled[:, 0] - center_x) * scale_factor
+        proj_scaled[:, 1] = (proj_scaled[:, 1] - center_y) * scale_factor
+    
+    # Convert to screen coordinates
     proj_scaled[:, 0] = (proj_scaled[:, 0] + 1) * image_size / 2
-    proj_scaled[:, 1] = (proj_scaled[:, 1] + 1) * image_size / 2
+    proj_scaled[:, 1] = (1 - proj_scaled[:, 1]) * image_size / 2  # Flip Y for screen coords
     
-    # Sort faces theo độ sâu (z-buffer đơn giản)
+    # Sort faces theo depth (z-buffer)
     face_depths = []
-    for face in faces:
-        avg_z = np.mean([z_values[i] for i in face])
-        face_depths.append(avg_z)
+    face_centers = []
+    valid_faces = []
     
-    # Sắp xếp faces theo độ sâu (xa nhất trước)
+    for i, face in enumerate(faces):
+        if len(face) >= 3 and all(idx < len(z_values) for idx in face[:3]):
+            # Tính depth trung bình
+            face_z_values = [z_values[idx] for idx in face[:3]]
+            avg_z = np.mean(face_z_values)
+            face_depths.append(avg_z)
+            
+            # Tính center của face
+            face_verts = [vertices_3d[idx] for idx in face[:3]]
+            center = np.mean(face_verts, axis=0)
+            face_centers.append(center)
+            valid_faces.append(i)
+    
+    if not face_depths:
+        return img
+        
+    # Sort faces (xa nhất trước - painter's algorithm)
     sorted_indices = np.argsort(face_depths)[::-1]
     
-    # Vẽ faces
-    for idx in sorted_indices:
-        face = faces[idx]
+    # Light direction
+    light_dir = np.array([0.5, 0.5, 1.0])
+    light_dir = light_dir / np.linalg.norm(light_dir)
+    
+    # Render faces
+    for sort_idx in sorted_indices:
+        face_idx = valid_faces[sort_idx]
+        face = faces[face_idx]
+        
         if len(face) >= 3:
-            # Lấy tọa độ của 3 vertices đầu
+            # Get vertices for triangle
             points = []
             face_colors = []
+            face_verts_3d = []
             valid = True
             
             for i in range(3):
                 vertex_idx = face[i]
-                if vertex_idx < len(proj_scaled):
+                if vertex_idx < len(proj_scaled) and vertex_idx < len(colors):
                     x, y = proj_scaled[vertex_idx]
-                    if 0 <= x < image_size and 0 <= y < image_size:
-                        points.append((int(x), int(y)))
+                    # Check bounds with some tolerance
+                    if -10 <= x <= image_size + 10 and -10 <= y <= image_size + 10:
+                        points.append((max(0, min(image_size-1, int(x))), 
+                                     max(0, min(image_size-1, int(y)))))
                         face_colors.append(colors[vertex_idx])
+                        face_verts_3d.append(vertices_3d[vertex_idx])
                     else:
                         valid = False
                         break
@@ -232,44 +365,40 @@ def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, 
                     valid = False
                     break
             
-            if valid and len(points) == 3:
-                # Tính màu trung bình
-                avg_color = np.mean(face_colors, axis=0)
-                # Áp dụng shading đơn giản
-                brightness = 0.3 + 0.7 * (face_depths[idx] / max(face_depths) if max(face_depths) > 0 else 1)
-                final_color = tuple((avg_color * brightness * 255).astype(int))
+            if valid and len(points) == 3 and len(face_verts_3d) == 3:
+                # Calculate lighting
+                normal = calculate_face_normal(
+                    face_verts_3d[0], face_verts_3d[1], face_verts_3d[2]
+                )
                 
-                # Vẽ triangle
+                # Lambertian shading
+                light_intensity = max(0.2, np.dot(normal, light_dir))
+                
+                # Calculate average color
+                avg_color = np.mean(face_colors, axis=0)
+                
+                # Apply lighting
+                final_color = avg_color * light_intensity
+                final_color = np.clip(final_color * 255, 0, 255).astype(int)
+                
+                # Convert to tuple
+                fill_color = tuple(final_color)
+                outline_color = tuple((final_color * 0.😎.astype(int))
+                
+                # Render triangle
                 try:
-                    draw.polygon(points, fill=final_color, outline=(100, 120, 150))
-                except:
-                    pass
-    
-    # Vẽ wireframe
-    for face in faces:
-        if len(face) >= 3:
-            points = []
-            for i in range(3):
-                vertex_idx = face[i]
-                if vertex_idx < len(proj_scaled):
-                    x, y = proj_scaled[vertex_idx]
-                    if 0 <= x < image_size and 0 <= y < image_size:
-                        points.append((int(x), int(y)))
-            
-            if len(points) == 3:
-                try:
-                    # Vẽ wireframe
-                    for i in range(3):
-                        start = points[i]
-                        end = points[(i + 1) % 3]
-                        draw.line([start, end], fill=(80, 100, 130), width=1)
-                except:
-                    pass
+                    # Check if triangle has area
+                    p1, p2, p3 = points
+                    area = abs((p2[0]-p1[0])*(p3[1]-p1[1]) - (p3[0]-p1[0])*(p2[1]-p1[1]))
+                    if area > 1:  # Only render if triangle has significant area
+                        draw.polygon(points, fill=fill_color, outline=outline_color, width=1)
+                except Exception as e:
+                    continue
     
     return img
 
 def generate_interactive_3d_html(vertices, colors, faces, mesh_size):
-    """Tạo HTML với Three.js cho 3D interactive"""
+    """Tạo HTML với Three.js cải tiến cho 3D interactive"""
     
     # Chuyển đổi dữ liệu sang format JSON
     vertices_js = vertices.tolist()
@@ -280,180 +409,372 @@ def generate_interactive_3d_html(vertices, colors, faces, mesh_size):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Interactive 3D Mesh</title>
+        <title>Interactive 3D Mesh - Enhanced</title>
         <style>
-            body {{ margin: 0; overflow: hidden; background: #1a1a2e; }}
-            #container {{ width: 100%; height: 500px; }}
+            body {{ 
+                margin: 0; 
+                overflow: hidden; 
+                background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 100%);
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            }}
+            #container {{ 
+                width: 100%; 
+                height: 100vh; 
+                position: relative;
+            }}
             #controls {{ 
                 position: absolute; 
-                top: 10px; 
-                left: 10px; 
-                background: rgba(0,0,0,0.7); 
+                top: 20px; 
+                left: 20px; 
+                background: rgba(0,0,0,0.8); 
                 color: white; 
-                padding: 10px; 
+                padding: 15px; 
+                border-radius: 8px;
+                font-size: 14px;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255,255,255,0.1);
+                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            }}
+            #stats {{
+                position: absolute;
+                bottom: 20px;
+                right: 20px;
+                background: rgba(0,0,0,0.8);
+                color: white;
+                padding: 10px;
                 border-radius: 5px;
-                font-family: Arial, sans-serif;
                 font-size: 12px;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255,255,255,0.1);
+            }}
+            .control-item {{
+                margin: 5px 0;
+                display: flex;
+                align-items: center;
+            }}
+            .emoji {{
+                margin-right: 8px;
+                font-size: 16px;
             }}
         </style>
     </head>
     <body>
         <div id="container"></div>
         <div id="controls">
-            <div>🖱️ Kéo chuột để xoay</div>
-            <div>🔍 Cuộn chuột để zoom</div>
-            <div>Vertices: {len(vertices)}</div>
-            <div>Faces: {len(faces)}</div>
+            <div class="control-item">
+                <span class="emoji">🖱️</span>
+                <span>Drag to rotate</span>
+            </div>
+            <div class="control-item">
+                <span class="emoji">🔍</span>
+                <span>Scroll to zoom</span>
+            </div>
+            <div class="control-item">
+                <span class="emoji">📐</span>
+                <span>Right-click to pan</span>
+            </div>
+            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.2);">
+                <div>Resolution: {mesh_size[0]}x{mesh_size[1]}</div>
+            </div>
+        </div>
+        <div id="stats">
+            <div>Vertices: {len(vertices):,}</div>
+            <div>Faces: {len(faces):,}</div>
+            <div>FPS: <span id="fps">--</span></div>
         </div>
         
         <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
         <script>
+            // Performance monitoring
+            let frameCount = 0;
+            let lastTime = Date.now();
+            
             // Scene setup
             const scene = new THREE.Scene();
-            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / 500, 0.1, 1000);
-            const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-            renderer.setSize(window.innerWidth, 500);
-            renderer.setClearColor(0x1a1a2e);
+            scene.fog = new THREE.Fog(0x0f0f23, 5, 15);
+            
+            const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            
+            const renderer = new THREE.WebGLRenderer({{ 
+                antialias: true,
+                alpha: true,
+                powerPreference: "high-performance"
+            }});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setClearColor(0x0f0f23, 1);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             document.getElementById('container').appendChild(renderer.domElement);
             
-            // Create geometry
+            // Create geometry with proper error handling
             const geometry = new THREE.BufferGeometry();
             
-            // Vertices
-            const vertices = {vertices_js};
-            const verticesArray = new Float32Array(vertices.length * 3);
-            for(let i = 0; i < vertices.length; i++) {{
-                verticesArray[i * 3] = vertices[i][0];
-                verticesArray[i * 3 + 1] = vertices[i][1]; 
-                verticesArray[i * 3 + 2] = vertices[i][2];
+            try {{
+                // Vertices
+                const vertices = {vertices_js};
+                if (vertices.length === 0) throw new Error("No vertices data");
+                
+                const verticesArray = new Float32Array(vertices.length * 3);
+                for(let i = 0; i < vertices.length; i++) {{
+                    if (vertices[i] && vertices[i].length >= 3) {{
+                        verticesArray[i * 3] = vertices[i][0] || 0;
+                        verticesArray[i * 3 + 1] = vertices[i][1] || 0; 
+                        verticesArray[i * 3 + 2] = vertices[i][2] || 0;
+                    }}
+                }}
+                geometry.setAttribute('position', new THREE.BufferAttribute(verticesArray, 3));
+                
+                // Colors
+                const colors = {colors_js};
+                const colorsArray = new Float32Array(vertices.length * 3);
+                for(let i = 0; i < colors.length && i < vertices.length; i++) {{
+                    if (colors[i] && colors[i].length >= 3) {{
+                        colorsArray[i * 3] = Math.max(0, Math.min(1, colors[i][0] || 0));
+                        colorsArray[i * 3 + 1] = Math.max(0, Math.min(1, colors[i][1] || 0));
+                        colorsArray[i * 3 + 2] = Math.max(0, Math.min(1, colors[i][2] || 0));
+                    }} else {{
+                        // Default gray color
+                        colorsArray[i * 3] = 0.5;
+                        colorsArray[i * 3 + 1] = 0.5;
+                        colorsArray[i * 3 + 2] = 0.5;
+                    }}
+                }}
+                geometry.setAttribute('color', new THREE.BufferAttribute(colorsArray, 3));
+                
+                // Faces/Indices
+                const faces = {faces_js};
+                const indices = [];
+                for(let i = 0; i < faces.length; i++) {{
+                    if (faces[i] && faces[i].length >= 3) {{
+                        const v1 = faces[i][0];
+                        const v2 = faces[i][1];
+                        const v3 = faces[i][2];
+                        
+                        // Validate indices
+                        if (v1 >= 0 && v2 >= 0 && v3 >= 0 && 
+                            v1 < vertices.length && v2 < vertices.length && v3 < vertices.length) {{
+                            indices.push(v1, v2, v3);
+                        }}
+                    }}
+                }}
+                
+                if (indices.length === 0) throw new Error("No valid faces");
+                geometry.setIndex(indices);
+                
+                // Compute normals for proper lighting
+                geometry.computeVertexNormals();
+                
+            }} catch(error) {{
+                console.error("Geometry creation error:", error);
+                // Create fallback geometry
+                const fallbackGeometry = new THREE.BoxGeometry(1, 1, 1);
+                geometry.copy(fallbackGeometry);
             }}
-            geometry.setAttribute('position', new THREE.BufferAttribute(verticesArray, 3));
-            
-            // Colors
-            const colors = {colors_js};
-            const colorsArray = new Float32Array(vertices.length * 3);
-            for(let i = 0; i < colors.length; i++) {{
-                colorsArray[i * 3] = colors[i][0];
-                colorsArray[i * 3 + 1] = colors[i][1];
-                colorsArray[i * 3 + 2] = colors[i][2];
-            }}
-            geometry.setAttribute('color', new THREE.BufferAttribute(colorsArray, 3));
-            
-            // Faces
-            const faces = {faces_js};
-            const indices = [];
-            for(let i = 0; i < faces.length; i++) {{
-                indices.push(faces[i][0], faces[i][1], faces[i][2]);
-            }}
-            geometry.setIndex(indices);
-            
-            // Compute normals
-            geometry.computeVertexNormals();
             
             // Materials
             const material = new THREE.MeshPhongMaterial({{ 
                 vertexColors: true,
                 side: THREE.DoubleSide,
-                shininess: 30
+                shininess: 60,
+                specular: 0x222222,
+                transparent: false,
+                flatShading: false
             }});
             
             const wireframeMaterial = new THREE.MeshBasicMaterial({{ 
                 color: 0x4a90e2,
                 wireframe: true,
                 transparent: true,
-                opacity: 0.3
+                opacity: 0.15,
+                depthWrite: false
             }});
             
             // Meshes
             const mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            
             const wireframe = new THREE.Mesh(geometry, wireframeMaterial);
+            wireframe.renderOrder = 1;
             
             scene.add(mesh);
             scene.add(wireframe);
             
-            // Lights
-            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            // Enhanced lighting setup
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.4);
             scene.add(ambientLight);
             
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            directionalLight.position.set(1, 1, 1);
-            scene.add(directionalLight);
+            const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            mainLight.position.set(2, 2, 2);
+            mainLight.castShadow = true;
+            mainLight.shadow.mapSize.width = 1024;
+            mainLight.shadow.mapSize.height = 1024;
+            scene.add(mainLight);
             
-            // Camera position
-            camera.position.z = 3;
+            const fillLight = new THREE.DirectionalLight(0x4466aa, 0.3);
+            fillLight.position.set(-1, -1, 1);
+            scene.add(fillLight);
             
-            // Mouse controls
-            let mouseDown = false;
-            let mouseX = 0;
-            let mouseY = 0;
-            let targetRotationX = 0;
-            let targetRotationY = 0;
-            let currentRotationX = 0;
-            let currentRotationY = 0;
+            // Camera positioning
+            camera.position.set(0, 0, 4);
+            camera.lookAt(0, 0, 0);
             
-            renderer.domElement.addEventListener('mousedown', onMouseDown, false);
-            renderer.domElement.addEventListener('mousemove', onMouseMove, false);
-            renderer.domElement.addEventListener('mouseup', onMouseUp, false);
-            renderer.domElement.addEventListener('wheel', onWheel, false);
+            // Enhanced controls
+            let isDragging = false;
+            let isPanning = false;
+            let previousMousePosition = {{ x: 0, y: 0 }};
+            let targetRotation = {{ x: 0, y: 0 }};
+            let currentRotation = {{ x: 0, y: 0 }};
+            let targetPosition = {{ x: 0, y: 0, z: 4 }};
+            let currentPosition = {{ x: 0, y: 0, z: 4 }};
+            
+            // Mouse event handlers
+            renderer.domElement.addEventListener('mousedown', onMouseDown);
+            renderer.domElement.addEventListener('mousemove', onMouseMove);
+            renderer.domElement.addEventListener('mouseup', onMouseUp);
+            renderer.domElement.addEventListener('wheel', onWheel);
+            renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
             
             function onMouseDown(event) {{
-                mouseDown = true;
-                mouseX = event.clientX;
-                mouseY = event.clientY;
+                if (event.button === 0) {{ // Left mouse button
+                    isDragging = true;
+                }} else if (event.button === 2) {{ // Right mouse button
+                    isPanning = true;
+                }}
+                previousMousePosition.x = event.clientX;
+                previousMousePosition.y = event.clientY;
             }}
             
             function onMouseMove(event) {{
-                if (mouseDown) {{
-                    const deltaX = event.clientX - mouseX;
-                    const deltaY = event.clientY - mouseY;
-                    
-                    targetRotationY += deltaX * 0.01;
-                    targetRotationX += deltaY * 0.01;
-                    
-                    mouseX = event.clientX;
-                    mouseY = event.clientY;
+                const deltaX = event.clientX - previousMousePosition.x;
+                const deltaY = event.clientY - previousMousePosition.y;
+                
+                if (isDragging) {{
+                    targetRotation.y += deltaX * 0.005;
+                    targetRotation.x += deltaY * 0.005;
+                    targetRotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, targetRotation.x));
+                }} else if (isPanning) {{
+                    const panSpeed = 0.002 * targetPosition.z;
+                    targetPosition.x -= deltaX * panSpeed;
+                    targetPosition.y += deltaY * panSpeed;
                 }}
+                
+                previousMousePosition.x = event.clientX;
+                previousMousePosition.y = event.clientY;
             }}
             
             function onMouseUp(event) {{
-                mouseDown = false;
+                isDragging = false;
+                isPanning = false;
             }}
             
             function onWheel(event) {{
-                camera.position.z += event.deltaY * 0.01;
-                camera.position.z = Math.max(1, Math.min(10, camera.position.z));
+                const zoomSpeed = 0.1;
+                targetPosition.z += event.deltaY * zoomSpeed * 0.01;
+                targetPosition.z = Math.max(1, Math.min(20, targetPosition.z));
+                event.preventDefault();
             }}
             
-            // Animation loop
+            // Animation loop with performance monitoring
             function animate() {{
                 requestAnimationFrame(animate);
                 
-                // Smooth rotation
-                currentRotationX += (targetRotationX - currentRotationX) * 0.1;
-                currentRotationY += (targetRotationY - currentRotationY) * 0.1;
+                // Update FPS counter
+                frameCount++;
+                const currentTime = Date.now();
+                if (currentTime - lastTime >= 1000) {{
+                    document.getElementById('fps').textContent = frameCount;
+                    frameCount = 0;
+                    lastTime = currentTime;
+                }}
                 
-                mesh.rotation.x = currentRotationX;
-                mesh.rotation.y = currentRotationY;
-                wireframe.rotation.x = currentRotationX;
-                wireframe.rotation.y = currentRotationY;
+                // Smooth interpolation
+                const lerpFactor = 0.1;
+                
+                currentRotation.x += (targetRotation.x - currentRotation.x) * lerpFactor;
+                currentRotation.y += (targetRotation.y - currentRotation.y) * lerpFactor;
+                
+                currentPosition.x += (targetPosition.x - currentPosition.x) * lerpFactor;
+                currentPosition.y += (targetPosition.y - currentPosition.y) * lerpFactor;
+                currentPosition.z += (targetPosition.z - currentPosition.z) * lerpFactor;
+                
+                // Apply transformations
+                mesh.rotation.x = currentRotation.x;
+                mesh.rotation.y = currentRotation.y;
+                wireframe.rotation.x = currentRotation.x;
+                wireframe.rotation.y = currentRotation.y;
+                
+                camera.position.set(currentPosition.x, currentPosition.y, currentPosition.z);
+                camera.lookAt(0, 0, 0);
                 
                 renderer.render(scene, camera);
             }}
             
+            // Handle window resize
+            function handleResize() {{
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }}
+            
+            window.addEventListener('resize', handleResize);
+            
+            // Start animation
             animate();
             
-            // Handle resize
-            window.addEventListener('resize', function() {{
-                camera.aspect = window.innerWidth / 500;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, 500);
+            // Add keyboard controls
+            document.addEventListener('keydown', function(event) {{
+                switch(event.code) {{
+                    case 'KeyR':
+                        // Reset view
+                        targetRotation = {{ x: 0, y: 0 }};
+                        targetPosition = {{ x: 0, y: 0, z: 4 }};
+                        break;
+                    case 'KeyW':
+                        // Toggle wireframe
+                        wireframe.visible = !wireframe.visible;
+                        break;
+                }}
             }});
+            
         </script>
     </body>
     </html>
     """
     
     return html_code
+
+# Hàm chính để test
+def process_image_to_3d(image_path, rotation_x=0, rotation_y=0, rotation_z=0):
+    """Xử lý ảnh thành 3D mesh với các cải tiến"""
+    
+    # Load image
+    image = Image.open(image_path).convert('RGB')
+    
+    # Tạo mesh 3D
+    vertices, colors, faces, mesh_size = create_3d_mesh(image, depth_scale=15, resolution=60)
+    
+    # Áp dụng rotation
+    if rotation_x != 0 or rotation_y != 0 or rotation_z != 0:
+        vertices, rotation_matrix = apply_3d_rotation(vertices, rotation_x, rotation_y, rotation_z)
+    
+    # Project 3D to 2D
+    projected, z_values = project_3d_to_2d(vertices, distance=4.5, fov=50)
+    
+    # Render 2D image
+    rendered_img = render_3d_mesh_advanced(vertices, colors, faces, projected, z_values)
+    
+    # Tạo HTML interactive
+    html_content = generate_interactive_3d_html(vertices, colors, faces, mesh_size)
+    
+    return rendered_img, html_content
+
+# Example usage:
+# rendered_image, html_code = process_image_to_3d("your_image.jpg", 
+#                                                rotation_x=15, 
+#                                                rotation_y=25, 
+#                                                rotation_z=0)
 
 # =================== MAIN APP ===================
 
