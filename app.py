@@ -1,501 +1,529 @@
-import streamlit as st
-import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance
-import io
+{rotation_matrix[1,0]:7.4f}   {rotation_matrix[1,1]:7.4f} ]
 
-# Import optional dependencies với error handling
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-    st.warning("⚠️ OpenCV không khả dụng - một số tính năng 3D sẽ bị hạn chế")
-
-try:
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-
-try:
-    import plotly.graph_objects as go
-    import plotly.express as px
-    HAS_PLOTLY = True
-except ImportError:
-    HAS_PLOTLY = False
-
-# Cấu hình trang
-st.set_page_config(
-    page_title="🎨 Chỉnh sửa ảnh 2D & 3D",
-    page_icon="🎨",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# CSS tùy chỉnh
-st.markdown("""
-<style>
-    .main-header {
-        text-align: center;
-        color: #4A90E2;
-        font-size: 2.5rem;
-        margin-bottom: 2rem;
-    }
-    
-    .stSlider > div > div > div > div {
-        background: linear-gradient(45deg, #667eea, #764ba2);
-    }
-    
-    .stButton > button {
-        background: linear-gradient(45deg, #667eea, #764ba2);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        width: 100%;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-    }
-    
-    .sidebar-section {
-        background: #f0f2f6;
-        padding: 1rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-    }
-    
-    .tab-content {
-        padding: 1rem;
-        border-radius: 10px;
-        background: #f8f9fa;
-        margin-top: 1rem;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Header
-st.markdown('<h1 class="main-header">🎨 Chỉnh sửa ảnh 2D & 3D</h1>', unsafe_allow_html=True)
-
-# Hàm chỉnh sửa ảnh 2D
-def edit_image_2d(image, brightness, contrast, saturation, blur_radius, rotation):
-    """Chỉnh sửa ảnh 2D với các tham số được cung cấp"""
-    if image is None:
-        return None
-    
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    
-    # Áp dụng độ sáng
-    enhancer = ImageEnhance.Brightness(image)
-    image = enhancer.enhance(brightness)
-    
-    # Áp dụng độ tương phản
-    enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(contrast)
-    
-    # Áp dụng độ bão hòa
-    enhancer = ImageEnhance.Color(image)
-    image = enhancer.enhance(saturation)
-    
-    # Áp dụng làm mờ
-    if blur_radius > 0:
-        image = image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
-    
-    # Áp dụng xoay
-    if rotation != 0:
-        image = image.rotate(rotation, expand=True, fillcolor='white')
-    
-    return image
-
-# Hàm tạo depth map từ ảnh
-def create_depth_map(image, method='brightness'):
-    """Tạo depth map từ ảnh để tạo hiệu ứng 3D"""
-    # Chuyển đổi sang grayscale
-    gray_array = np.array(image.convert('L'))
-    
-    if method == 'sobel' and HAS_CV2:
-        # Sử dụng Sobel edge detection
-        sobelx = cv2.Sobel(gray_array, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray_array, cv2.CV_64F, 0, 1, ksize=3)
-        depth = np.sqrt(sobelx**2 + sobely**2)
-    elif method == 'laplacian' and HAS_CV2:
-        # Sử dụng Laplacian
-        depth = cv2.Laplacian(gray_array, cv2.CV_64F)
-        depth = np.abs(depth)
-    elif method == 'brightness':
-        # Sử dụng độ sáng làm depth
-        depth = gray_array.astype(np.float64)
-    elif method == 'gaussian' and HAS_CV2:
-        # Gaussian blur difference
-        blur1 = cv2.GaussianBlur(gray_array, (5, 5), 0)
-        blur2 = cv2.GaussianBlur(gray_array, (15, 15), 0)
-        depth = np.abs(blur2.astype(np.float64) - blur1.astype(np.float64))
-    else:
-        # Fallback to brightness method
-        depth = gray_array.astype(np.float64)
-        if not HAS_CV2:
-            st.info("💡 Sử dụng phương pháp brightness do thiếu OpenCV")
-    
-    # Normalize depth map
-    if depth.max() > depth.min():
-        depth = (depth - depth.min()) / (depth.max() - depth.min())
-    else:
-        depth = np.zeros_like(depth)
-    return depth
-
-# Hàm tạo anaglyphs 3D (Red-Cyan)
-def create_anaglyph(image, depth_intensity=0.1, shift_amount=5):
-    """Tạo ảnh anaglyph 3D (Red-Cyan)"""
-    img_array = np.array(image)
-    height, width = img_array.shape[:2]
-    
-    # Tạo depth map
-    depth = create_depth_map(image, 'brightness')
-    
-    # Tạo displacement map
-    displacement = (depth * shift_amount * depth_intensity).astype(int)
-    
-    # Tạo left và right eye views
-    left_eye = img_array.copy()
-    right_eye = img_array.copy()
-    
-    # Shift pixels based on depth
-    for y in range(height):
-        for x in range(width):
-            shift = displacement[y, x]
+θ = {rotation_2d}° = {theta:.4f} radians
+cos(θ) = {np.cos(theta):7.4f}
+sin(θ) = {np.sin(theta):7.4f}
+                """)
+                st.markdown('</div>', unsafe_allow_html=True)
+        
+        if shear_x != 0 or shear_y != 0:
+            shear_matrix = shear_matrix_2d(shear_x, shear_y)
             
-            # Left eye (red channel) - shift left
-            if x - shift >= 0:
-                left_eye[y, x] = img_array[y, x - shift]
-            
-            # Right eye (cyan channels) - shift right  
-            if x + shift < width:
-                right_eye[y, x] = img_array[y, x + shift]
-    
-    # Combine channels for anaglyph
-    anaglyph = np.zeros_like(img_array)
-    anaglyph[:, :, 0] = left_eye[:, :, 0]  # Red from left eye
-    anaglyph[:, :, 1] = right_eye[:, :, 1]  # Green from right eye
-    anaglyph[:, :, 2] = right_eye[:, :, 2]  # Blue from right eye
-    
-    return Image.fromarray(anaglyph)
-
-# Hàm tạo stereogram
-def create_stereogram(image, pattern_width=100):
-    """Tạo stereogram từ ảnh"""
-    depth = create_depth_map(image, 'brightness')
-    height, width = depth.shape
-    
-    # Tạo random pattern
-    pattern = np.random.randint(0, 256, (height, pattern_width, 3), dtype=np.uint8)
-    
-    # Tạo stereogram
-    stereogram = np.zeros((height, width, 3), dtype=np.uint8)
-    
-    for y in range(height):
-        for x in range(width):
-            # Lấy pattern position
-            pattern_x = x % pattern_width
-            
-            # Áp dụng depth displacement
-            displacement = int(depth[y, x] * 20)  # Scale depth
-            source_x = (pattern_x - displacement) % pattern_width
-            
-            stereogram[y, x] = pattern[y, source_x]
-    
-    return Image.fromarray(stereogram)
-
-# Hàm tạo 3D heightmap với fallback
-def create_3d_heightmap_simple(image, height_scale=50):
-    """Tạo 3D heightmap data (không cần plotly)"""
-    # Resize image for performance
-    img_resized = image.resize((50, 50))  # Giảm size để tránh lag
-    gray = img_resized.convert('L')
-    height_data = np.array(gray)
-    
-    # Tạo coordinate grids
-    x = np.arange(0, height_data.shape[1])
-    y = np.arange(0, height_data.shape[0])
-    X, Y = np.meshgrid(x, y)
-    Z = height_data * height_scale / 255.0
-    
-    return X, Y, Z, height_data
-
-# Upload ảnh
-uploaded_file = st.file_uploader(
-    "📁 Chọn ảnh để chỉnh sửa", 
-    type=['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'],
-    help="Hỗ trợ: PNG, JPG, JPEG, GIF, BMP, TIFF"
-)
-
-if uploaded_file is not None:
-    # Đọc ảnh gốc
-    original_image = Image.open(uploaded_file)
-    
-    # Tạo tabs cho 2D và 3D
-    tab1, tab2 = st.tabs(["🖼️ Chỉnh sửa 2D", "🌐 Hiệu ứng 3D"])
-    
-    with tab1:
-        # Hiển thị ảnh gốc
-        st.subheader("📷 Ảnh gốc")
-        st.image(original_image, use_column_width=True)
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                st.markdown(f"**Shear Matrix S({shear_x:.2f}, {shear_y:.2f})**")
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                st.code(f"""
+S = [  {shear_matrix[0,0]:7.4f}   {shear_matrix[0,1]:7.4f} ]
+    [  {shear_matrix[1,0]:7.4f}   {shear_matrix[1,1]:7.4f} ]
+                """)
+                st.markdown('</div>', unsafe_allow_html=True)
         
-        # Sidebar controls cho 2D
-        st.sidebar.markdown("## 🎛️ Tham số 2D")
-        st.sidebar.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+        # Hiển thị thông tin transforms
+        if transforms_applied:
+            st.markdown("### 🔧 Phép biến đổi đã áp dụng")
+            st.markdown('<div class="transform-info">', unsafe_allow_html=True)
+            for key, value in transforms_applied.items():
+                st.markdown(f"• **{value}**")
+            st.markdown('</div>', unsafe_allow_html=True)
         
-        brightness = st.sidebar.slider("🔆 Độ sáng", 0.0, 2.0, 1.0, 0.1)
-        contrast = st.sidebar.slider("🌈 Độ tương phản", 0.0, 2.0, 1.0, 0.1)
-        saturation = st.sidebar.slider("🎨 Độ bão hòa", 0.0, 2.0, 1.0, 0.1)
-        blur_radius = st.sidebar.slider("🔲 Làm mờ", 0, 10, 0, 1)
-        rotation = st.sidebar.slider("🌀 Xoay (độ)", 0, 360, 0, 1)
-        
-        st.sidebar.markdown('</div>', unsafe_allow_html=True)
-        
-        # Áp dụng chỉnh sửa 2D
-        edited_image = edit_image_2d(
-            original_image.copy(), 
-            brightness, contrast, saturation, blur_radius, rotation
-        )
-        
-        # Hiển thị kết quả 2D
-        st.subheader("✨ Ảnh đã chỉnh sửa")
-        st.image(edited_image, use_column_width=True)
-        
-        # Download button cho 2D
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
+        # Download button
+        if edited_image:
             buf = io.BytesIO()
             edited_image.save(buf, format='PNG')
-            byte_data = buf.getvalue()
+            buf.seek(0)
             
             st.download_button(
                 label="💾 Tải xuống ảnh 2D",
-                data=byte_data,
-                file_name=f"edited_2d_{uploaded_file.name.split('.')[0]}.png",
-                mime="image/png",
-                use_container_width=True
+                data=buf,
+                file_name=f"edited_2d_{uploaded_file.name}",
+                mime="image/png"
             )
     
     with tab2:
-        st.subheader("🌐 Các hiệu ứng 3D")
+        st.subheader("🌐 Hiệu ứng 3D với Givens Rotation")
         
         # Sidebar controls cho 3D
-        st.sidebar.markdown("## 🌐 Tham số 3D")
+        st.sidebar.markdown("## 🎛️ Tham số 3D Givens")
         st.sidebar.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
         
-        # Kiểm tra dependencies và hiển thị options phù hợp
-        available_effects = ["Anaglyph 3D", "Stereogram", "Depth Map"]
-        if HAS_PLOTLY:
-            available_effects.append("3D Heightmap")
+        # 3D Givens Rotations
+        st.sidebar.markdown("### 🔄 Givens Rotations 3D")
+        theta_x = st.sidebar.slider("🔄 Rotation X (độ)", -180, 180, 0, 5)
+        theta_y = st.sidebar.slider("🔄 Rotation Y (độ)", -180, 180, 0, 5)
+        theta_z = st.sidebar.slider("🔄 Rotation Z (độ)", -180, 180, 0, 5)
         
-        effect_type = st.sidebar.selectbox(
-            "🎭 Loại hiệu ứng",
-            available_effects
+        rotation_order = st.sidebar.selectbox(
+            "📐 Thứ tự rotation", 
+            ['zyx', 'xyz', 'xzy', 'yxz', 'yzx', 'zxy'],
+            help="Thứ tự áp dụng các rotation matrices"
         )
         
-        if effect_type == "Anaglyph 3D":
-            depth_intensity = st.sidebar.slider("🔍 Cường độ độ sâu", 0.0, 1.0, 0.1, 0.05)
-            shift_amount = st.sidebar.slider("↔️ Độ dịch chuyển", 1, 20, 5, 1)
-        elif effect_type == "3D Heightmap" and HAS_PLOTLY:
-            height_scale = st.sidebar.slider("⬆️ Tỷ lệ độ cao", 10, 100, 50, 5)
+        # 3D Transformations
+        st.sidebar.markdown("### 📏 Scale 3D")
+        scale_3d_x = st.sidebar.slider("📏 Scale X", 0.1, 3.0, 1.0, 0.1)
+        scale_3d_y = st.sidebar.slider("📏 Scale Y", 0.1, 3.0, 1.0, 0.1)
+        scale_3d_z = st.sidebar.slider("📏 Scale Z", 0.1, 3.0, 1.0, 0.1)
         
-        # Depth method options dựa trên available libraries
-        depth_methods = ["brightness"]
-        if HAS_CV2:
-            depth_methods.extend(["sobel", "laplacian", "gaussian"])
+        st.sidebar.markdown("### 📍 Translation 3D")
+        translate_x = st.sidebar.slider("📍 Translate X", -2.0, 2.0, 0.0, 0.1)
+        translate_y = st.sidebar.slider("📍 Translate Y", -2.0, 2.0, 0.0, 0.1)
+        translate_z = st.sidebar.slider("📍 Translate Z", -2.0, 2.0, 0.0, 0.1)
         
-        depth_method = st.sidebar.selectbox(
-            "🎯 Phương pháp tạo độ sâu",
-            depth_methods
-        )
+        # Mesh parameters
+        st.sidebar.markdown("### 🕸️ Tham số Mesh")
+        depth_scale = st.sidebar.slider("🏔️ Độ sâu", 1, 100, 30, 5)
+        mesh_resolution = st.sidebar.slider("🔍 Độ phân giải", 20, 100, 50, 10)
+        
+        depth_methods = ['enhanced', 'laplacian', 'brightness']
+        depth_method = st.sidebar.selectbox("🎨 Phương pháp depth", depth_methods)
+        
+        # Camera parameters
+        st.sidebar.markdown("### 📹 Tham số Camera")
+        camera_distance = st.sidebar.slider("📏 Khoảng cách camera", 1.0, 10.0, 3.0, 0.5)
+        fov = st.sidebar.slider("🔍 Field of View", 30, 120, 45, 5)
+        
+        lighting = st.sidebar.checkbox("💡 Lighting", True)
         
         st.sidebar.markdown('</div>', unsafe_allow_html=True)
         
-        # Tạo hiệu ứng 3D
-        if effect_type == "Anaglyph 3D":
-            st.markdown("### 🔴🔵 Anaglyph 3D (Cần kính 3D đỏ-xanh)")
-            anaglyph_image = create_anaglyph(original_image, depth_intensity, shift_amount)
-            st.image(anaglyph_image, use_column_width=True)
-            
-            # Download anaglyph
-            buf = io.BytesIO()
-            anaglyph_image.save(buf, format='PNG')
-            st.download_button(
-                "💾 Tải xuống Anaglyph 3D",
-                buf.getvalue(),
-                f"anaglyph_3d_{uploaded_file.name.split('.')[0]}.png",
-                "image/png"
-            )
-            
-        elif effect_type == "Stereogram":
-            st.markdown("### 👀 Stereogram (Magic Eye)")
-            st.info("💡 Mẹo: Nhìn xuyên qua màn hình và thả lỏng mắt để thấy hình 3D")
-            stereogram_image = create_stereogram(original_image)
-            st.image(stereogram_image, use_column_width=True)
-            
-            # Download stereogram
-            buf = io.BytesIO()
-            stereogram_image.save(buf, format='PNG')
-            st.download_button(
-                "💾 Tải xuống Stereogram",
-                buf.getvalue(),
-                f"stereogram_{uploaded_file.name.split('.')[0]}.png",
-                "image/png"
-            )
-            
-        elif effect_type == "Depth Map":
-            st.markdown("### 🗺️ Bản đồ độ sâu")
-            depth_map = create_depth_map(original_image, depth_method)
-            
-            # Hiển thị depth map với hoặc không có matplotlib
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Ảnh gốc**")
-                st.image(original_image, use_column_width=True)
-            
-            with col2:
-                st.markdown(f"**Depth Map ({depth_method})**")
-                # Chuyển depth map thành ảnh để hiển thị
-                depth_img = Image.fromarray((depth_map * 255).astype(np.uint8))
-                st.image(depth_img, use_column_width=True)
-            
-            # Download depth map
-            buf = io.BytesIO()
-            depth_img.save(buf, format='PNG')
-            st.download_button(
-                "💾 Tải xuống Depth Map",
-                buf.getvalue(),
-                f"depth_map_{uploaded_file.name.split('.')[0]}.png",
-                "image/png"
-            )
-            
-        elif effect_type == "3D Heightmap":
-            st.markdown("### 🏔️ 3D Heightmap")
-            
-            if HAS_PLOTLY:
-                # Tạo 3D heightmap
-                X, Y, Z, height_data = create_3d_heightmap_simple(original_image, height_scale)
-                
-                # Sử dụng Plotly để tạo 3D surface
-                fig = go.Figure(data=[go.Surface(
-                    x=X, y=Y, z=Z,
-                    colorscale='Viridis',
-                    showscale=True
-                )])
-                
-                fig.update_layout(
-                    title="3D Heightmap của ảnh",
-                    scene=dict(
-                        xaxis_title="X",
-                        yaxis_title="Y", 
-                        zaxis_title="Độ cao",
-                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                    ),
-                    width=800,
-                    height=600
+        # Tạo và xử lý 3D mesh
+        if st.button("🚀 Tạo hiệu ứng 3D"):
+            with st.spinner("🔄 Đang tạo mesh 3D..."):
+                # Tạo mesh 3D
+                vertices, colors, faces, normals, depth_map = create_enhanced_3d_mesh(
+                    original_image, depth_scale, mesh_resolution, depth_method
                 )
                 
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.error("❌ Cần Plotly để hiển thị 3D Heightmap")
-                st.markdown("Cài đặt: `pip install plotly`")
+                # Áp dụng transformations
+                theta_x_rad = np.radians(theta_x)
+                theta_y_rad = np.radians(theta_y)
+                theta_z_rad = np.radians(theta_z)
+                
+                transformed_vertices, rotation_matrix, scale_matrix = apply_3d_givens_transformations(
+                    vertices, theta_x_rad, theta_y_rad, theta_z_rad,
+                    scale_3d_x, scale_3d_y, scale_3d_z,
+                    translate_x, translate_y, translate_z,
+                    rotation_order
+                )
+                
+                # Perspective projection
+                fov_rad = np.radians(fov)
+                projected_vertices = perspective_projection_enhanced(
+                    transformed_vertices, fov_rad, aspect=1.0, 
+                    camera_distance=camera_distance
+                )
+                
+                # Render mesh
+                rendered_3d = render_3d_mesh_enhanced(
+                    transformed_vertices, colors, faces, projected_vertices,
+                    image_size=(800, 800), lighting=lighting
+                )
+                
+                # Hiển thị kết quả
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**📷 Ảnh gốc:**")
+                    st.image(original_image, use_column_width=True)
+                    
+                    st.markdown("**🗺️ Depth Map:**")
+                    depth_img = Image.fromarray((depth_map * 255).astype(np.uint8))
+                    st.image(depth_img, use_column_width=True)
+                
+                with col2:
+                    st.markdown("**🌐 Ảnh 3D với Givens:**")
+                    st.image(rendered_3d, use_column_width=True)
+                
+                # Hiển thị ma trận 3D
+                st.markdown("### 📊 Ma trận Givens 3D được áp dụng")
+                
+                # Individual rotation matrices
+                if theta_x != 0 or theta_y != 0 or theta_z != 0:
+                    Rx = givens_rotation_matrix_3d(theta_x_rad, 'x')
+                    Ry = givens_rotation_matrix_3d(theta_y_rad, 'y')
+                    Rz = givens_rotation_matrix_3d(theta_z_rad, 'z')
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                        st.markdown(f"**Rx({theta_x}°)**")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                        st.code(f"""
+Rx = [{Rx[0,0]:6.3f} {Rx[0,1]:6.3f} {Rx[0,2]:6.3f}]
+     [{Rx[1,0]:6.3f} {Rx[1,1]:6.3f} {Rx[1,2]:6.3f}]
+     [{Rx[2,0]:6.3f} {Rx[2,1]:6.3f} {Rx[2,2]:6.3f}]
+                        """)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                        st.markdown(f"**Ry({theta_y}°)**")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                        st.code(f"""
+Ry = [{Ry[0,0]:6.3f} {Ry[0,1]:6.3f} {Ry[0,2]:6.3f}]
+     [{Ry[1,0]:6.3f} {Ry[1,1]:6.3f} {Ry[1,2]:6.3f}]
+     [{Ry[2,0]:6.3f} {Ry[2,1]:6.3f} {Ry[2,2]:6.3f}]
+                        """)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    with col3:
+                        st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                        st.markdown(f"**Rz({theta_z}°)**")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                        st.code(f"""
+Rz = [{Rz[0,0]:6.3f} {Rz[0,1]:6.3f} {Rz[0,2]:6.3f}]
+     [{Rz[1,0]:6.3f} {Rz[1,1]:6.3f} {Rz[1,2]:6.3f}]
+     [{Rz[2,0]:6.3f} {Rz[2,1]:6.3f} {Rz[2,2]:6.3f}]
+                        """)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Combined rotation matrix
+                st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                st.markdown(f"**Ma trận rotation kết hợp (order: {rotation_order.upper()})**")
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                    st.code(f"""
+R_combined = [{rotation_matrix[0,0]:7.4f} {rotation_matrix[0,1]:7.4f} {rotation_matrix[0,2]:7.4f}]
+             [{rotation_matrix[1,0]:7.4f} {rotation_matrix[1,1]:7.4f} {rotation_matrix[1,2]:7.4f}]
+             [{rotation_matrix[2,0]:7.4f} {rotation_matrix[2,1]:7.4f} {rotation_matrix[2,2]:7.4f}]
+                    """)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Scale matrix
+                if scale_3d_x != 1.0 or scale_3d_y != 1.0 or scale_3d_z != 1.0:
+                    st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+                    st.markdown(f"**Ma trận Scale 3D**")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col2:
+                        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+                        st.code(f"""
+S = [{scale_matrix[0,0]:7.4f} {scale_matrix[0,1]:7.4f} {scale_matrix[0,2]:7.4f}]
+    [{scale_matrix[1,0]:7.4f} {scale_matrix[1,1]:7.4f} {scale_matrix[1,2]:7.4f}]
+    [{scale_matrix[2,0]:7.4f} {scale_matrix[2,1]:7.4f} {scale_matrix[2,2]:7.4f}]
+                        """)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                
+                # 3D Statistics
+                st.markdown("### 📈 Thống kê 3D")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("🔺 Vertices", len(vertices))
+                with col2:
+                    st.metric("📐 Faces", len(faces))
+                with col3:
+                    st.metric("🎨 Colors", len(colors))
+                with col4:
+                    st.metric("📏 Resolution", f"{mesh_resolution}x{mesh_resolution}")
+                
+                # Download 3D result
+                buf_3d = io.BytesIO()
+                rendered_3d.save(buf_3d, format='PNG')
+                buf_3d.seek(0)
+                
+                st.download_button(
+                    label="💾 Tải xuống ảnh 3D",
+                    data=buf_3d,
+                    file_name=f"3d_givens_{uploaded_file.name}",
+                    mime="image/png"
+                )
         
-        # Hiển thị thông tin về hiệu ứng
-        st.markdown("---")
-        st.subheader("ℹ️ Thông tin về hiệu ứng 3D")
-        
-        if effect_type == "Anaglyph 3D":
-            st.markdown("""
-            **Anaglyph 3D** tạo hiệu ứng chiều sâu bằng cách:
-            - Tạo hai hình ảnh từ góc nhìn khác nhau
-            - Kết hợp kênh đỏ (mắt trái) và kênh xanh lam/lục (mắt phải)
-            - Cần kính 3D đỏ-xanh để xem hiệu ứng tốt nhất
-            """)
-        elif effect_type == "Stereogram":
-            st.markdown("""
-            **Stereogram** (Magic Eye) tạo ảo giác 3D bằng cách:
-            - Sử dụng pattern lặp lại với độ lệch nhỏ
-            - Mắt phải và trái nhìn thấy pattern khác nhau
-            - Não bộ kết hợp tạo cảm giác chiều sâu
-            """)
-        elif effect_type == "Depth Map":
-            st.markdown("""
-            **Depth Map** thể hiện độ sâu bằng:
-            - Phân tích cường độ sáng/tối của pixel
-            - Vùng sáng = gần, vùng tối = xa (hoặc ngược lại)
-            - Sử dụng để tạo các hiệu ứng 3D khác
-            """)
-        elif effect_type == "3D Heightmap":
-            st.markdown("""
-            **3D Heightmap** biến đổi ảnh thành bề mặt 3D:
-            - Cường độ sáng = độ cao
-            - Tạo địa hình 3D từ ảnh 2D
-            - Có thể xoay và zoom để xem từ mọi góc độ
-            """)
-
-    # Thông tin ảnh (sidebar)
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📊 Thông tin ảnh")
-    st.sidebar.write(f"📏 **Kích thước:** {original_image.size[0]} x {original_image.size[1]} pixels")
-    st.sidebar.write(f"🎨 **Định dạng:** {original_image.format}")
-    st.sidebar.write(f"🔢 **Mode:** {original_image.mode}")
+        else:
+            st.info("👆 Nhấn nút 'Tạo hiệu ứng 3D' để xem kết quả")
     
-    # Nút reset
-    if st.sidebar.button("🔄 Đặt lại tất cả"):
-        st.rerun()
+    with tab3:
+        st.subheader("📊 Ma trận & Công thức Givens Rotation")
+        
+        # Theory section
+        st.markdown("### 🧮 Lý thuyết Ma trận Givens")
+        
+        st.markdown("""
+        **Givens Rotation** là một phép biến đổi trực giao được sử dụng để xoay vector trong không gian 2D hoặc 3D.
+        Ma trận Givens có tính chất đặc biệt là **trực giao** (orthogonal), nghĩa là G^T × G = I.
+        """)
+        
+        # 2D Givens
+        st.markdown("#### 🔄 Ma trận Givens 2D")
+        st.markdown('<div class="math-formula">', unsafe_allow_html=True)
+        st.markdown("**Công thức tổng quát:**")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+        st.code("""
+G₂D(θ) = [cos(θ)  -sin(θ)]
+         [sin(θ)   cos(θ)]
+
+Với θ là góc xoay (radian)
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown("**Tính chất:**")
+        st.markdown("""
+        • **Trực giao**: G^T × G = I
+        • **Det(G) = 1**: Bảo toàn thể tích
+        • **Nghịch đảo**: G^(-1) = G^T = G(-θ)
+        """)
+        
+        # 3D Givens
+        st.markdown("#### 🌐 Ma trận Givens 3D")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("**Rotation quanh trục X:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+Rx(θ) = [1    0       0   ]
+        [0  cos(θ) -sin(θ)]
+        [0  sin(θ)  cos(θ)]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("**Rotation quanh trục Y:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+Ry(θ) = [ cos(θ) 0  sin(θ)]
+        [   0    1    0   ]
+        [-sin(θ) 0  cos(θ)]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown("**Rotation quanh trục Z:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+Rz(θ) = [cos(θ) -sin(θ) 0]
+        [sin(θ)  cos(θ) 0]
+        [  0       0    1]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Combined rotations
+        st.markdown("#### 🔗 Kết hợp Rotations 3D")
+        st.markdown("""
+        Khi kết hợp nhiều rotation, thứ tự nhân ma trận rất quan trọng:
+        """)
+        
+        st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+        st.code("""
+Rotation Orders:
+• ZYX: R = Rx(θx) × Ry(θy) × Rz(θz)  [Euler angles]
+• XYZ: R = Rz(θz) × Ry(θy) × Rx(θx)  [Roll-Pitch-Yaw]
+• ZXY: R = Ry(θy) × Rx(θx) × Rz(θz)  [Alternative]
+
+Lưu ý: A × B ≠ B × A (không giao hoán)
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Other transformations
+        st.markdown("#### 🔧 Các phép biến đổi khác")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Ma trận Scale:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+S₃D = [sx  0   0 ]
+      [0  sy   0 ]
+      [0   0  sz ]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("**Ma trận Shear 2D:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+Sh = [1   shx]
+     [shy  1 ]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("**Ma trận Translation 3D:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+T₃D = [1  0  0  tx]
+      [0  1  0  ty]
+      [0  0  1  tz]
+      [0  0  0   1]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("**Ma trận Reflection:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code("""
+Refl_x = [1   0]  Refl_y = [-1  0]
+         [0  -1]           [0   1]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Applications
+        st.markdown("### 🚀 Ứng dụng trong Computer Graphics")
+        
+        st.markdown("""
+        **1. 🎮 Game Development:**
+        • Xoay nhân vật, object trong game
+        • Animation và chuyển động
+        • Camera controls
+        
+        **2. 🎬 Computer Vision:**
+        • Image registration và alignment
+        • Object detection và tracking
+        • Augmented Reality (AR)
+        
+        **3. 🏗️ 3D Modeling:**
+        • Mesh transformations
+        • Skeletal animation
+        • Geometric modeling
+        
+        **4. 🔬 Scientific Computing:**
+        • Numerical linear algebra
+        • QR decomposition
+        • Eigenvalue problems
+        """)
+        
+        # Interactive demo
+        st.markdown("### 🎯 Demo tương tác")
+        
+        demo_angle = st.slider("🔄 Góc xoay demo (độ)", 0, 360, 45, 15)
+        demo_theta = np.radians(demo_angle)
+        demo_matrix = givens_rotation_matrix_2d(demo_theta)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Ma trận Givens:**")
+            st.markdown('<div class="matrix-display">', unsafe_allow_html=True)
+            st.code(f"""
+G({demo_angle}°) = [{demo_matrix[0,0]:7.4f} {demo_matrix[0,1]:7.4f}]
+           [{demo_matrix[1,0]:7.4f} {demo_matrix[1,1]:7.4f}]
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("**Tính chất:**")
+            det = np.linalg.det(demo_matrix)
+            st.markdown(f"• **Determinant:** {det:.6f}")
+            st.markdown(f"• **cos({demo_angle}°):** {np.cos(demo_theta):.4f}")
+            st.markdown(f"• **sin({demo_angle}°):** {np.sin(demo_theta):.4f}")
+            st.markdown(f"• **Orthogonal:** {'✅' if np.allclose(np.dot(demo_matrix.T, demo_matrix), np.eye(2)) else '❌'}")
+        
+        # Performance notes
+        st.markdown("### ⚡ Lưu ý Performance")
+        
+        st.markdown("""
+        **Tối ưu hóa:**
+        
+        🟢 **Nhanh:**
+        • Sử dụng NumPy vectorized operations
+        • Pre-compute sin/cos values
+        • Batch processing cho nhiều vertices
+        
+        🟡 **Trung bình:**
+        • Loop qua từng vertex riêng lẻ
+        • Tính toán realtime cho large meshes
+        
+        🔴 **Chậm:**
+        • Python loops thuần túy
+        • Không sử dụng matrix operations
+        • Recompute matrices mỗi frame
+        """)
+        
+        st.markdown('<div class="transform-info">', unsafe_allow_html=True)
+        st.markdown("""
+        💡 **Pro Tips:**
+        • Kết hợp multiple transformations thành 1 ma trận duy nhất
+        • Sử dụng homogeneous coordinates cho 3D transformations
+        • Cache computed matrices khi có thể
+        • Sử dụng GPU acceleration cho large datasets
+        """)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 else:
-    st.info("👆 Vui lòng upload ảnh để bắt đầu chỉnh sửa!")
+    # Landing page
+    st.markdown("""
+    ## 👋 Chào mừng đến với Givens Rotation Image Editor!
     
-    # Hướng dẫn sử dụng
-    st.markdown("---")
-    st.subheader("📖 Hướng dẫn sử dụng")
+    ### 🎯 Tính năng chính:
     
-    col1, col2 = st.columns(2)
+    **🖼️ Chỉnh sửa 2D:**
+    • Givens Rotation với góc tùy chỉnh
+    • Shear, Scale, Reflection transformations
+    • Brightness, Contrast, Saturation adjustments
+    • Gaussian Blur effects
     
+    **🌐 Hiệu ứng 3D:**
+    • Tạo mesh 3D từ ảnh 2D với depth mapping
+    • Áp dụng Givens rotation cho cả 3 trục X, Y, Z
+    • Multiple rotation orders (ZYX, XYZ, etc.)
+    • Enhanced lighting và shading
+    • Perspective projection
+    
+    **📊 Visualization:**
+    • Hiển thị ma trận transformations
+    • Interactive demos
+    • Real-time parameter adjustments
+    
+    ### 🚀 Cách sử dụng:
+    1. **Upload ảnh** bằng cách nhấn nút "Chọn ảnh" ở sidebar
+    2. **Chọn tab** để chỉnh sửa 2D hoặc tạo hiệu ứng 3D
+    3. **Điều chỉnh tham số** bằng các slider
+    4. **Xem kết quả** và download ảnh đã chỉnh sửa
+    
+    ### 📚 Về Givens Rotation:
+    Givens Rotation là một phép biến đổi trực giao fundamental trong linear algebra, 
+    được sử dụng rộng rãi trong computer graphics, computer vision, và scientific computing.
+    
+    ---
+    **📁 Hãy upload một ảnh để bắt đầu!**
+    """)
+    
+    # Example images section
+    st.markdown("### 🖼️ Ví dụ kết quả:")
+    
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown("""
-        ### 🖼️ Chỉnh sửa 2D:
-        - **Độ sáng:** Tăng/giảm ánh sáng tổng thể
-        - **Tương phản:** Độ rõ nét giữa vùng sáng/tối  
-        - **Bão hòa:** Cường độ màu sắc
-        - **Làm mờ:** Hiệu ứng blur Gaussian
-        - **Xoay:** Quay ảnh theo góc độ
-        
-        ### 🌐 Hiệu ứng 3D:
-        - **Anaglyph:** Cần kính 3D đỏ-xanh
-        - **Stereogram:** Nhìn xuyên qua để thấy 3D
-        """)
-    
+        st.markdown("**Original Image**")
+        st.markdown("📷 Ảnh gốc")
     with col2:
-        st.markdown("""
-        ### 🎯 Depth Map Methods:
-        - **Sobel:** Edge detection để tìm độ sâu
-        - **Laplacian:** Phát hiện biến đổi cường độ
-        - **Brightness:** Độ sáng làm độ sâu
-        - **Gaussian:** So sánh các mức blur
-        
-        ### 💡 Mẹo sử dụng:
-        - Ảnh có contrast cao cho hiệu ứng 3D tốt hơn
-        - Thử các depth method khác nhau
-        - Điều chỉnh tham số để có kết quả tối ưu
-        """)
+        st.markdown("**2D Givens Rotation**")
+        st.markdown("🔄 Xoay + chỉnh sửa 2D")
+    with col3:
+        st.markdown("**3D Mesh Effect**")
+        st.markdown("🌐 Hiệu ứng 3D với depth")
     
-    # Demo formats
-    st.markdown("---")
-    st.subheader("🖼️ Định dạng được hỗ trợ")
-    st.markdown("PNG • JPG • JPEG • GIF • BMP • TIFF")
+    st.markdown("""
+    ### 🔧 Yêu cầu hệ thống:
+    - **Python 3.7+**
+    - **Required:** Streamlit, NumPy, PIL
+    - **Optional:** OpenCV (cho enhanced 3D effects), Matplotlib (cho advanced visualization)
+    
+    ### 📖 Supported Formats:
+    PNG, JPG, JPEG, GIF, BMP, TIFF
+    """)
 
 # Footer
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666;'>🎨 Được tạo bằng Streamlit với khả năng 3D</div>", 
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div style='text-align: center; color: #666; margin-top: 2rem;'>
+    <p>🎨 <strong>Givens Rotation Image Editor</strong> - Powered by Mathematical Transformations</p>
+    <p>📊 Built with Streamlit • 🧮 Linear Algebra • 🎯 Computer Graphics</p>
+</div>
+""", unsafe_allow_html=True)
