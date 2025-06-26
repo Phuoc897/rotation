@@ -1,12 +1,29 @@
 import streamlit as st
-import cv2
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
+from PIL import Image, ImageFilter, ImageEnhance
 import io
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-import plotly.graph_objects as go
-import plotly.express as px
+
+# Import optional dependencies với error handling
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+    st.warning("⚠️ OpenCV không khả dụng - một số tính năng 3D sẽ bị hạn chế")
+
+try:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
 # Cấu hình trang
 st.set_page_config(
@@ -96,31 +113,39 @@ def edit_image_2d(image, brightness, contrast, saturation, blur_radius, rotation
     return image
 
 # Hàm tạo depth map từ ảnh
-def create_depth_map(image, method='sobel'):
+def create_depth_map(image, method='brightness'):
     """Tạo depth map từ ảnh để tạo hiệu ứng 3D"""
     # Chuyển đổi sang grayscale
-    gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    gray_array = np.array(image.convert('L'))
     
-    if method == 'sobel':
+    if method == 'sobel' and HAS_CV2:
         # Sử dụng Sobel edge detection
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        sobelx = cv2.Sobel(gray_array, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray_array, cv2.CV_64F, 0, 1, ksize=3)
         depth = np.sqrt(sobelx**2 + sobely**2)
-    elif method == 'laplacian':
+    elif method == 'laplacian' and HAS_CV2:
         # Sử dụng Laplacian
-        depth = cv2.Laplacian(gray, cv2.CV_64F)
+        depth = cv2.Laplacian(gray_array, cv2.CV_64F)
         depth = np.abs(depth)
     elif method == 'brightness':
         # Sử dụng độ sáng làm depth
-        depth = gray.astype(np.float64)
-    else:
+        depth = gray_array.astype(np.float64)
+    elif method == 'gaussian' and HAS_CV2:
         # Gaussian blur difference
-        blur1 = cv2.GaussianBlur(gray, (5, 5), 0)
-        blur2 = cv2.GaussianBlur(gray, (15, 15), 0)
+        blur1 = cv2.GaussianBlur(gray_array, (5, 5), 0)
+        blur2 = cv2.GaussianBlur(gray_array, (15, 15), 0)
         depth = np.abs(blur2.astype(np.float64) - blur1.astype(np.float64))
+    else:
+        # Fallback to brightness method
+        depth = gray_array.astype(np.float64)
+        if not HAS_CV2:
+            st.info("💡 Sử dụng phương pháp brightness do thiếu OpenCV")
     
     # Normalize depth map
-    depth = (depth - depth.min()) / (depth.max() - depth.min())
+    if depth.max() > depth.min():
+        depth = (depth - depth.min()) / (depth.max() - depth.min())
+    else:
+        depth = np.zeros_like(depth)
     return depth
 
 # Hàm tạo anaglyphs 3D (Red-Cyan)
@@ -185,11 +210,11 @@ def create_stereogram(image, pattern_width=100):
     
     return Image.fromarray(stereogram)
 
-# Hàm tạo heightmap 3D
-def create_3d_heightmap(image, height_scale=50):
-    """Tạo 3D heightmap visualization"""
+# Hàm tạo 3D heightmap với fallback
+def create_3d_heightmap_simple(image, height_scale=50):
+    """Tạo 3D heightmap data (không cần plotly)"""
     # Resize image for performance
-    img_resized = image.resize((100, 100))
+    img_resized = image.resize((50, 50))  # Giảm size để tránh lag
     gray = img_resized.convert('L')
     height_data = np.array(gray)
     
@@ -199,11 +224,7 @@ def create_3d_heightmap(image, height_scale=50):
     X, Y = np.meshgrid(x, y)
     Z = height_data * height_scale / 255.0
     
-    # Tạo màu từ ảnh gốc
-    img_array = np.array(img_resized)
-    colors = img_array.reshape(-1, 3) / 255.0
-    
-    return X, Y, Z, colors
+    return X, Y, Z, height_data
 
 # Upload ảnh
 uploaded_file = st.file_uploader(
@@ -268,20 +289,30 @@ if uploaded_file is not None:
         st.sidebar.markdown("## 🌐 Tham số 3D")
         st.sidebar.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
         
+        # Kiểm tra dependencies và hiển thị options phù hợp
+        available_effects = ["Anaglyph 3D", "Stereogram", "Depth Map"]
+        if HAS_PLOTLY:
+            available_effects.append("3D Heightmap")
+        
         effect_type = st.sidebar.selectbox(
             "🎭 Loại hiệu ứng",
-            ["Anaglyph 3D", "Stereogram", "Depth Map", "3D Heightmap"]
+            available_effects
         )
         
         if effect_type == "Anaglyph 3D":
             depth_intensity = st.sidebar.slider("🔍 Cường độ độ sâu", 0.0, 1.0, 0.1, 0.05)
             shift_amount = st.sidebar.slider("↔️ Độ dịch chuyển", 1, 20, 5, 1)
-        elif effect_type == "3D Heightmap":
+        elif effect_type == "3D Heightmap" and HAS_PLOTLY:
             height_scale = st.sidebar.slider("⬆️ Tỷ lệ độ cao", 10, 100, 50, 5)
+        
+        # Depth method options dựa trên available libraries
+        depth_methods = ["brightness"]
+        if HAS_CV2:
+            depth_methods.extend(["sobel", "laplacian", "gaussian"])
         
         depth_method = st.sidebar.selectbox(
             "🎯 Phương pháp tạo độ sâu",
-            ["sobel", "laplacian", "brightness", "gaussian"]
+            depth_methods
         )
         
         st.sidebar.markdown('</div>', unsafe_allow_html=True)
@@ -322,46 +353,59 @@ if uploaded_file is not None:
             st.markdown("### 🗺️ Bản đồ độ sâu")
             depth_map = create_depth_map(original_image, depth_method)
             
-            # Hiển thị depth map
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            # Hiển thị depth map với hoặc không có matplotlib
+            col1, col2 = st.columns(2)
             
-            ax1.imshow(original_image)
-            ax1.set_title("Ảnh gốc")
-            ax1.axis('off')
+            with col1:
+                st.markdown("**Ảnh gốc**")
+                st.image(original_image, use_column_width=True)
             
-            im = ax2.imshow(depth_map, cmap='viridis')
-            ax2.set_title(f"Depth Map ({depth_method})")
-            ax2.axis('off')
-            plt.colorbar(im, ax=ax2)
+            with col2:
+                st.markdown(f"**Depth Map ({depth_method})**")
+                # Chuyển depth map thành ảnh để hiển thị
+                depth_img = Image.fromarray((depth_map * 255).astype(np.uint8))
+                st.image(depth_img, use_column_width=True)
             
-            st.pyplot(fig)
+            # Download depth map
+            buf = io.BytesIO()
+            depth_img.save(buf, format='PNG')
+            st.download_button(
+                "💾 Tải xuống Depth Map",
+                buf.getvalue(),
+                f"depth_map_{uploaded_file.name.split('.')[0]}.png",
+                "image/png"
+            )
             
         elif effect_type == "3D Heightmap":
             st.markdown("### 🏔️ 3D Heightmap")
             
-            # Tạo 3D heightmap
-            X, Y, Z, colors = create_3d_heightmap(original_image, height_scale)
-            
-            # Sử dụng Plotly để tạo 3D surface
-            fig = go.Figure(data=[go.Surface(
-                x=X, y=Y, z=Z,
-                colorscale='Viridis',
-                showscale=True
-            )])
-            
-            fig.update_layout(
-                title="3D Heightmap của ảnh",
-                scene=dict(
-                    xaxis_title="X",
-                    yaxis_title="Y", 
-                    zaxis_title="Độ cao",
-                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
-                ),
-                width=800,
-                height=600
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+            if HAS_PLOTLY:
+                # Tạo 3D heightmap
+                X, Y, Z, height_data = create_3d_heightmap_simple(original_image, height_scale)
+                
+                # Sử dụng Plotly để tạo 3D surface
+                fig = go.Figure(data=[go.Surface(
+                    x=X, y=Y, z=Z,
+                    colorscale='Viridis',
+                    showscale=True
+                )])
+                
+                fig.update_layout(
+                    title="3D Heightmap của ảnh",
+                    scene=dict(
+                        xaxis_title="X",
+                        yaxis_title="Y", 
+                        zaxis_title="Độ cao",
+                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.5))
+                    ),
+                    width=800,
+                    height=600
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error("❌ Cần Plotly để hiển thị 3D Heightmap")
+                st.markdown("Cài đặt: `pip install plotly`")
         
         # Hiển thị thông tin về hiệu ứng
         st.markdown("---")
