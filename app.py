@@ -79,52 +79,24 @@ def givens_3d(theta, axis='z'):
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 def rotate_image_2d(image, angle_deg):
-    """Xoay ảnh 2D bằng Givens rotation"""
-    theta = np.radians(angle_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
+    """Xoay ảnh 2D bằng Givens rotation quanh tâm ảnh"""
+    # Tạo ảnh mới với nền trong suốt
+    result = Image.new("RGBA", image.size, (0, 0, 0, 0))
     
-    # Tâm xoay
-    cx, cy = image.width // 2, image.height // 2
-    
-    # Ma trận affine cho PIL
-    a, b = c, s
-    c_val, d = -s, c
-    e = cx * (1 - c) + cy * s
-    f = cy * (1 - c) - cx * s
-    
-    return image.transform(
-        image.size, Image.AFFINE,
-        (a, b, c_val, d, e, f),
-        resample=Image.BICUBIC,
-        fillcolor='white'
+    # Xoay ảnh gốc
+    rotated = image.rotate(
+        angle_deg, 
+        resample=Image.BICUBIC, 
+        expand=False,
+        center=(image.width//2, image.height//2)
     )
-
-def givens_3d(angle, axis):
-    """Tạo ma trận rotation 3D cho trục x, y, z"""
-    cos_a = np.cos(angle)
-    sin_a = np.sin(angle)
     
-    if axis == 'x':
-        return np.array([
-            [1, 0, 0],
-            [0, cos_a, -sin_a],
-            [0, sin_a, cos_a]
-        ])
-    elif axis == 'y':
-        return np.array([
-            [cos_a, 0, sin_a],
-            [0, 1, 0],
-            [-sin_a, 0, cos_a]
-        ])
-    elif axis == 'z':
-        return np.array([
-            [cos_a, -sin_a, 0],
-            [sin_a, cos_a, 0],
-            [0, 0, 1]
-        ])
+    # Dán ảnh đã xoay vào ảnh kết quả
+    result.paste(rotated, (0, 0))
+    
+    return result
 
-def create_3d_mesh(image, depth_scale=20, resolution=50):
+def create_3d_mesh(image, depth_scale=20, resolution=80):
     """Tạo mesh 3D cải tiến từ ảnh với chất lượng cao hơn"""
     # Resize ảnh với phương pháp LANCZOS để giữ chất lượng
     img_small = image.resize((resolution, resolution), Image.Resampling.LANCZOS)
@@ -138,7 +110,7 @@ def create_3d_mesh(image, depth_scale=20, resolution=50):
         depth = img_array.copy()
     
     # Áp dụng Gaussian blur để smooth depth map
-    depth = gaussian_blur(depth, sigma=0.😎
+    depth = gaussian_blur(depth, sigma=0.8)
     
     # Normalize depth với scaling tốt hơn
     depth_normalized = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
@@ -216,19 +188,28 @@ def gaussian_blur(image, sigma=1.0):
     return result
 
 def apply_3d_rotation(vertices, rx, ry, rz):
-    """Áp dụng rotation 3D với ma trận kết hợp"""
-    # Chuyển sang radian
-    rx_rad = np.radians(rx)
-    ry_rad = np.radians(ry)
-    rz_rad = np.radians(rz)
+    """Áp dụng rotation 3D với ma trận kết hợp - Tối ưu hóa"""
+    if rx == 0 and ry == 0 and rz == 0:
+        return vertices, np.eye(3)
     
-    # Tạo ma trận rotation cho từng trục
-    Rx = givens_3d(rx_rad, 'x')
-    Ry = givens_3d(ry_rad, 'y')
-    Rz = givens_3d(rz_rad, 'z')
+    # Tạo ma trận rotation tổng hợp
+    R = np.eye(3)
+    axes = []
+    angles = []
     
-    # Kết hợp rotation (Z * Y * X order)
-    R = np.dot(Rz, np.dot(Ry, Rx))
+    if rx != 0:
+        axes.append('x')
+        angles.append(np.radians(rx))
+    if ry != 0:
+        axes.append('y')
+        angles.append(np.radians(ry))
+    if rz != 0:
+        axes.append('z')
+        angles.append(np.radians(rz))
+    
+    # Áp dụng rotation theo thứ tự
+    for axis, angle in zip(axes, angles):
+        R = np.dot(givens_3d(angle, axis), R)
     
     # Áp dụng rotation cho tất cả vertices
     rotated = np.dot(vertices, R.T)
@@ -275,7 +256,7 @@ def calculate_face_normal(v1, v2, v3):
         return normal / length
     return np.array([0, 0, 1])
 
-def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, image_size=800):
+def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, image_size=1000):
     """Render mesh 3D với improved shading và anti-aliasing"""
     
     # Tạo image với background gradient
@@ -383,7 +364,7 @@ def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, 
                 
                 # Convert to tuple
                 fill_color = tuple(final_color)
-                outline_color = tuple((final_color * 0.😎.astype(int))
+                outline_color = tuple((final_color * 0.8).astype(int))
                 
                 # Render triangle
                 try:
@@ -770,12 +751,6 @@ def process_image_to_3d(image_path, rotation_x=0, rotation_y=0, rotation_z=0):
     
     return rendered_img, html_content
 
-# Example usage:
-# rendered_image, html_code = process_image_to_3d("your_image.jpg", 
-#                                                rotation_x=15, 
-#                                                rotation_y=25, 
-#                                                rotation_z=0)
-
 # =================== MAIN APP ===================
 
 # Upload file
@@ -863,7 +838,7 @@ if uploaded_file:
             depth_scale = st.slider("🏔️ Độ sâu", 10, 100, 30, 10)
         with col2:
             ry = st.slider("🔄 Rotation Y", -180, 180, -20, 15)
-            resolution = st.slider("🔍 Độ phân giải", 20, 60, 40, 10)
+            resolution = st.slider("🔍 Độ phân giải", 20, 100, 60, 5)
         with col3:
             rz = st.slider("🔄 Rotation Z", -180, 180, 0, 15)
             render_mode = st.selectbox("🎨 Chế độ render", ["Solid", "Wireframe", "Both"])
@@ -933,7 +908,7 @@ if uploaded_file:
             if st.button("🔧 Tạo mesh mặc định"):
                 with st.spinner("Đang tạo mesh..."):
                     vertices, colors, faces, mesh_size = create_3d_mesh(
-                        original_image, 30, 30
+                        original_image, 30, 60
                     )
                     st.session_state['mesh_data'] = {
                         'vertices': vertices,
