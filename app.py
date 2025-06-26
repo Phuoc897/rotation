@@ -352,7 +352,23 @@ if uploaded_file:
         brightness = st.slider("Độ sáng", 0.5, 2.0, 1.0, 0.05)
         quality = st.selectbox("Chất lượng render", ['normal', 'high', 'ultra'])
 
-        # Render ảnh mới
+        # Cấu hình lưới và làm mượt
+        if quality == 'ultra':
+            step = 1
+            blur_sigma = 1.2
+        elif quality == 'high':
+            step = 2
+            blur_sigma = 1.0
+        else:
+            step = 4
+            blur_sigma = 0
+
+        # Tạo hiệu ứng 3D xoay
+        gray_img = image.convert('L')
+        depth_map = np.array(gray_img) / 255.0
+        if blur_sigma > 0:
+            depth_map = simple_gaussian_blur(depth_map, sigma=blur_sigma)
+
         result_img = create_givens_3d_effect(
             image, xy_angle, xz_angle, yz_angle,
             depth_strength=depth_strength,
@@ -364,3 +380,4 @@ if uploaded_file:
 
     except:
         st.error("Ảnh không hợp lệ")
+
