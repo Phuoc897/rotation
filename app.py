@@ -1,3 +1,4 @@
+# chỉnh code ảnh 2D lại chỉ xoay quanh tâm như bth thoy , còn 3d bỏ các hàm tách các điểm ảnh pixel ra chỉ xoay givens 3d thoy
 import streamlit as st
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw
@@ -79,7 +80,7 @@ def givens_3d(theta, axis='z'):
         return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 def rotate_image_2d(image, angle_deg):
-    """Xoay ảnh 2D bằng Givens rotation"""
+    """Xoay ảnh 2D bằng Givens rotation quanh tâm"""
     theta = np.radians(angle_deg)
     c = np.cos(theta)
     s = np.sin(theta)
@@ -100,30 +101,6 @@ def rotate_image_2d(image, angle_deg):
         fillcolor='white'
     )
 
-def givens_3d(angle, axis):
-    """Tạo ma trận rotation 3D cho trục x, y, z"""
-    cos_a = np.cos(angle)
-    sin_a = np.sin(angle)
-    
-    if axis == 'x':
-        return np.array([
-            [1, 0, 0],
-            [0, cos_a, -sin_a],
-            [0, sin_a, cos_a]
-        ])
-    elif axis == 'y':
-        return np.array([
-            [cos_a, 0, sin_a],
-            [0, 1, 0],
-            [-sin_a, 0, cos_a]
-        ])
-    elif axis == 'z':
-        return np.array([
-            [cos_a, -sin_a, 0],
-            [sin_a, cos_a, 0],
-            [0, 0, 1]
-        ])
-
 def create_3d_mesh(image, depth_scale=20, resolution=50):
     """Tạo mesh 3D cải tiến từ ảnh với chất lượng cao hơn"""
     # Resize ảnh với phương pháp LANCZOS để giữ chất lượng
@@ -138,7 +115,7 @@ def create_3d_mesh(image, depth_scale=20, resolution=50):
         depth = img_array.copy()
     
     # Áp dụng Gaussian blur để smooth depth map
-    depth = gaussian_blur(depth, sigma=0.😎
+    depth = gaussian_blur(depth, sigma=0.8)
     
     # Normalize depth với scaling tốt hơn
     depth_normalized = (depth - np.min(depth)) / (np.max(depth) - np.min(depth))
@@ -383,7 +360,7 @@ def render_3d_mesh_advanced(vertices_3d, colors, faces, projected_2d, z_values, 
                 
                 # Convert to tuple
                 fill_color = tuple(final_color)
-                outline_color = tuple((final_color * 0.😎.astype(int))
+                outline_color = tuple((final_color * 0.8).astype(int))
                 
                 # Render triangle
                 try:
@@ -744,37 +721,6 @@ def generate_interactive_3d_html(vertices, colors, faces, mesh_size):
     """
     
     return html_code
-
-# Hàm chính để test
-def process_image_to_3d(image_path, rotation_x=0, rotation_y=0, rotation_z=0):
-    """Xử lý ảnh thành 3D mesh với các cải tiến"""
-    
-    # Load image
-    image = Image.open(image_path).convert('RGB')
-    
-    # Tạo mesh 3D
-    vertices, colors, faces, mesh_size = create_3d_mesh(image, depth_scale=15, resolution=60)
-    
-    # Áp dụng rotation
-    if rotation_x != 0 or rotation_y != 0 or rotation_z != 0:
-        vertices, rotation_matrix = apply_3d_rotation(vertices, rotation_x, rotation_y, rotation_z)
-    
-    # Project 3D to 2D
-    projected, z_values = project_3d_to_2d(vertices, distance=4.5, fov=50)
-    
-    # Render 2D image
-    rendered_img = render_3d_mesh_advanced(vertices, colors, faces, projected, z_values)
-    
-    # Tạo HTML interactive
-    html_content = generate_interactive_3d_html(vertices, colors, faces, mesh_size)
-    
-    return rendered_img, html_content
-
-# Example usage:
-# rendered_image, html_code = process_image_to_3d("your_image.jpg", 
-#                                                rotation_x=15, 
-#                                                rotation_y=25, 
-#                                                rotation_z=0)
 
 # =================== MAIN APP ===================
 
