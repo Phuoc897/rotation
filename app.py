@@ -3,6 +3,8 @@ import numpy as np
 import cv2
 import numba as nb
 import gdown
+from PIL import Image
+from io import BytesIO
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
@@ -103,28 +105,39 @@ st.title("🎨 Image Rotation with Givens Transform")
 
 mode = st.sidebar.radio("Rotation Mode", ["2D", "3D"])
 
-# Bỏ type để cho phép upload mọi định dạng
+# Cho phép mọi định dạng file, fallback qua PIL nếu OpenCV không đọc được
 uploaded = st.file_uploader("Upload an image")
 
 if uploaded:
-    data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+    # Đọc raw bytes
+    raw_bytes = uploaded.read()
+    data = np.frombuffer(raw_bytes, np.uint8)
+
+    # Thử decode bằng OpenCV
     img_raw = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
 
     if img_raw is None:
-        st.error("Định dạng file không được hỗ trợ hoặc file bị lỗi.")
-        st.stop()
-
-    # Chuẩn hoá thành RGB
-    if img_raw.ndim == 2:
-        img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2RGB)
-    elif img_raw.shape[2] == 4:
-        img = cv2.cvtColor(img_raw, cv2.COLOR_BGRA2RGB)
+        # Fallback: PIL
+        try:
+            pil_img = Image.open(BytesIO(raw_bytes))
+            pil_img = pil_img.convert("RGB")
+            img = np.array(pil_img)
+        except Exception:
+            st.error("Định dạng file không được hỗ trợ hoặc file bị lỗi.")
+            st.stop()
     else:
-        img = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
+        # Chuẩn hoá thành RGB
+        if img_raw.ndim == 2:
+            img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2RGB)
+        elif img_raw.shape[2] == 4:
+            img = cv2.cvtColor(img_raw, cv2.COLOR_BGRA2RGB)
+        else:
+            img = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
 
     st.subheader("Original Image")
     st.image(img, use_column_width=True)
 
+    # Xoay 2D hoặc 3D
     if mode == "2D":
         angle2d = st.sidebar.slider("Angle (degrees)", -180, 180, 0)
         if st.sidebar.button("Rotate 2D"):
