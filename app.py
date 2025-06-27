@@ -7,6 +7,12 @@ from werkzeug.utils import secure_filename
 import base64
 import io
 from PIL import Image
+import uuid
+import logging
+
+# Thiết lập logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -21,16 +27,16 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 class ImageRotation:
-    def __init__(self, image: np.array):
+    def __init__(self, image: np.ndarray):
         self.image = image
         self.height = self.image.shape[0]
         self.width = self.image.shape[1]
         self.channel = self.image.shape[2] if len(self.image.shape) > 2 else 1
 
         # Tạo tọa độ cho từng pixel trong ảnh
-        x, y = np.meshgrid(range(self.height), range(self.width))
+        y, x = np.meshgrid(range(self.height), range(self.width))
         z = np.zeros_like(x)
-        self.pixels = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
+        self.pixels = np.stack((x.flatten(), y.flatten(), z.flatten()), axis=1)
 
     def givens_matrix(self, i, j, theta):
         if i < 0 or i > 2 or j < 0 or j > 2 or i == j:
@@ -51,77 +57,97 @@ class ImageRotation:
         return np.array([[c, -s], [s, c]])
 
     def givens_rotation_2d(self, theta):
-        theta_rad = np.deg2rad(theta)
-        rotation_matrix = self.givens_matrix_2d(theta_rad)
-        
-        center_x, center_y = self.height // 2, self.width // 2
-        
-        # Tạo tọa độ pixel 2D
-        y_coords, x_coords = np.meshgrid(range(self.width), range(self.height))
-        coords = np.stack([x_coords.flatten() - center_x, y_coords.flatten() - center_y])
-        
-        # Xoay tọa độ
-        rotated_coords = rotation_matrix @ coords
-        rotated_coords[0] += center_x
-        rotated_coords[1] += center_y
-        
-        # Tính kích thước ảnh đầu ra
-        min_x, max_x = int(np.min(rotated_coords[0])), int(np.max(rotated_coords[0]))
-        min_y, max_y = int(np.min(rotated_coords[1])), int(np.max(rotated_coords[1]))
-        
-        output_height = max_x - min_x + 1
-        output_width = max_y - min_y + 1
-        
-        # Điều chỉnh tọa độ để không âm
-        rotated_coords[0] -= min_x
-        rotated_coords[1] -= min_y
-        
-        # Tạo ảnh đầu ra
-        if len(self.image.shape) == 3:
-            output_image = np.zeros((output_height, output_width, self.image.shape[2]), dtype=self.image.dtype)
-        else:
-            output_image = np.zeros((output_height, output_width), dtype=self.image.dtype)
-        
-        # Map pixel values với interpolation cơ bản
-        for i in range(len(coords[0])):
-            orig_x = i // self.width
-            orig_y = i % self.width
-            new_x = int(rotated_coords[0][i])
-            new_y = int(rotated_coords[1][i])
+        try:
+            theta_rad = np.deg2rad(theta)
+            rotation_matrix = self.givens_matrix_2d(theta_rad)
             
-            if 0 <= new_x < output_height and 0 <= new_y < output_width:
-                if len(self.image.shape) == 3:
-                    output_image[new_x, new_y] = self.image[orig_x, orig_y]
-                else:
-                    output_image[new_x, new_y] = self.image[orig_x, orig_y]
-        
-        return output_image
+            center_x, center_y = self.height // 2, self.width // 2
+            
+            # Tạo tọa độ pixel 2D
+            y_coords, x_coords = np.meshgrid(range(self.width), range(self.height))
+            coords = np.stack([x_coords.flatten() - center_x, y_coords.flatten() - center_y])
+            
+            # Xoay tọa độ
+            rotated_coords = rotation_matrix @ coords
+            rotated_coords[0] += center_x
+            rotated_coords[1] += center_y
+            
+            # Tính kích thước ảnh đầu ra
+            min_x, max_x = int(np.min(rotated_coords[0])), int(np.max(rotated_coords[0]))
+            min_y, max_y = int(np.min(rotated_coords[1])), int(np.max(rotated_coords[1]))
+            
+            output_height = max_x - min_x + 1
+            output_width = max_y - min_y + 1
+            
+            # Kiểm tra kích thước hợp lệ
+            if output_height <= 0 or output_width <= 0:
+                raise ValueError("Invalid output dimensions")
+            
+            # Điều chỉnh tọa độ để không âm
+            rotated_coords[0] -= min_x
+            rotated_coords[1] -= min_y
+            
+            # Tạo ảnh đầu ra
+            if len(self.image.shape) == 3:
+                output_image = np.zeros((output_height, output_width, self.image.shape[2]), dtype=self.image.dtype)
+            else:
+                output_image = np.zeros((output_height, output_width), dtype=self.image.dtype)
+            
+            # Map pixel values với interpolation cơ bản
+            for i in range(len(coords[0])):
+                orig_x = i // self.width
+                orig_y = i % self.width
+                new_x = int(rotated_coords[0][i])
+                new_y = int(rotated_coords[1][i])
+                
+                if 0 <= new_x < output_height and 0 <= new_y < output_width:
+                    if 0 <= orig_x < self.height and 0 <= orig_y < self.width:
+                        if len(self.image.shape) == 3:
+                            output_image[new_x, new_y] = self.image[orig_x, orig_y]
+                        else:
+                            output_image[new_x, new_y] = self.image[orig_x, orig_y]
+            
+            return output_image
+        except Exception as e:
+            logger.error(f"Error in 2D rotation: {str(e)}")
+            raise
 
     def givens_rotation(self, pixels, alpha, theta, gamma):
-        Ry = self.givens_matrix(1, 2, theta)
-        Rx = self.givens_matrix(0, 2, alpha)
-        Rz = self.givens_matrix(0, 1, gamma)
+        try:
+            Ry = self.givens_matrix(1, 2, theta)
+            Rx = self.givens_matrix(0, 2, alpha)
+            Rz = self.givens_matrix(0, 1, gamma)
 
-        pixels = self.centering_image(pixels)
-        return pixels @ Rx @ Ry @ Rz
+            pixels = self.centering_image(pixels)
+            return pixels @ Rx @ Ry @ Rz
+        except Exception as e:
+            logger.error(f"Error in 3D rotation: {str(e)}")
+            raise
 
     def centering_image(self, pixels):
         center = np.mean(pixels, axis=0)
         return pixels - center
 
     def projectPoints(self, object_point, camera_matrix):
-        tvec = np.array([0, 0, self.focal_length * 1.5], dtype=np.float32)
-        X_cam = object_point.T + tvec.reshape(3,1)
+        try:
+            tvec = np.array([0, 0, self.focal_length * 1.5], dtype=np.float32)
+            X_cam = object_point.T + tvec.reshape(3, 1)
 
-        x = X_cam[0] / X_cam[2]
-        y = X_cam[1] / X_cam[2]
+            # Tránh chia cho 0
+            Z_cam = np.where(X_cam[2] != 0, X_cam[2], 1e-8)
+            
+            x = X_cam[0] / Z_cam
+            y = X_cam[1] / Z_cam
 
-        fx = camera_matrix[0,0]
-        cx, cy = camera_matrix[0,2], camera_matrix[1,2]
+            fx = camera_matrix[0, 0]
+            cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
 
-        u = fx * x + cx
-        v = fx * y + cy
-        return np.stack([u, v], axis=1)
+            u = fx * x + cx
+            v = fx * y + cy
+            return np.stack([u, v], axis=1)
+        except Exception as e:
+            logger.error(f"Error in point projection: {str(e)}")
+            raise
 
     def initialize_projection_parameters(self, max_angle):
         if max_angle < 0 or max_angle > 90:
@@ -137,30 +163,44 @@ class ImageRotation:
             [0, 0, 1]
         ], dtype=np.float32)
 
-    def rotate_image_3d(self, alpha:int=0, theta:int=0, gamma:int=0):
-        if alpha < -90 or alpha > 90 or theta < -90 or theta > 90 or gamma < -90 or gamma > 90:
-            raise ValueError("Góc xoay phải nằm trong khoảng [-90, 90] độ.")
+    def rotate_image_3d(self, alpha: int = 0, theta: int = 0, gamma: int = 0):
+        try:
+            # Kiểm tra tham số đầu vào
+            if not all(-90 <= angle <= 90 for angle in [alpha, theta, gamma]):
+                raise ValueError("Góc xoay phải nằm trong khoảng [-90, 90] độ.")
 
-        self.alpha = np.deg2rad(alpha)
-        self.theta = np.deg2rad(theta)
-        self.gamma = np.deg2rad(gamma)
+            self.alpha = np.deg2rad(alpha)
+            self.theta = np.deg2rad(theta)
+            self.gamma = np.deg2rad(gamma)
 
-        rotated_pixels = self.givens_rotation(self.pixels.copy(), self.alpha, self.theta, self.gamma)
-        self.initialize_projection_parameters(np.max(np.abs([alpha, theta, gamma])))
+            rotated_pixels = self.givens_rotation(self.pixels.copy(), self.alpha, self.theta, self.gamma)
+            self.initialize_projection_parameters(np.max(np.abs([alpha, theta, gamma])))
 
-        self.projected_points = self.projectPoints(rotated_pixels, self.camera_matrix).astype(int)
-        self.projected_points -= np.min(self.projected_points, axis=0)
+            self.projected_points = self.projectPoints(rotated_pixels, self.camera_matrix).astype(int)
+            
+            # Kiểm tra projected_points có hợp lệ không
+            if self.projected_points.size == 0:
+                raise ValueError("No valid projected points")
+                
+            self.projected_points -= np.min(self.projected_points, axis=0)
 
-        max_height = np.max(self.projected_points[:, 0]) + 1
-        max_width = np.max(self.projected_points[:, 1]) + 1
+            max_height = np.max(self.projected_points[:, 0]) + 1
+            max_width = np.max(self.projected_points[:, 1]) + 1
 
-        if len(self.image.shape) > 2:
-            self.output_image = np.zeros((max_height, max_width, self.image.shape[2]), dtype=self.image.dtype) + 255
-        else:
-            self.output_image = np.zeros((max_height, max_width), dtype=self.image.dtype) + 255
+            # Kiểm tra kích thước hợp lệ
+            if max_height <= 0 or max_width <= 0:
+                raise ValueError("Invalid output dimensions")
 
-        self.output_image = assign_pixels_parallel(self.pixels, self.projected_points, self.image, self.output_image)
-        return self.output_image
+            if len(self.image.shape) > 2:
+                self.output_image = np.full((max_height, max_width, self.image.shape[2]), 255, dtype=self.image.dtype)
+            else:
+                self.output_image = np.full((max_height, max_width), 255, dtype=self.image.dtype)
+
+            self.output_image = assign_pixels_parallel(self.pixels, self.projected_points, self.image, self.output_image)
+            return self.output_image
+        except Exception as e:
+            logger.error(f"Error in 3D rotation: {str(e)}")
+            raise
 
 @nb.njit(parallel=True)
 def assign_pixels_parallel(pixels, projected_points, image, output_image):
@@ -170,42 +210,58 @@ def assign_pixels_parallel(pixels, projected_points, image, output_image):
         proj_x = projected_points[i, 0]
         proj_y = projected_points[i, 1]
 
-        if image.ndim == 3:
-            for c in range(image.shape[2]):
-                output_image[proj_x, proj_y, c] = image[orig_x, orig_y, c]
-        else:
-            output_image[proj_x, proj_y] = image[orig_x, orig_y]
+        # Kiểm tra bounds
+        if (0 <= orig_x < image.shape[0] and 0 <= orig_y < image.shape[1] and
+            0 <= proj_x < output_image.shape[0] and 0 <= proj_y < output_image.shape[1]):
+            
+            if image.ndim == 3:
+                for c in range(image.shape[2]):
+                    output_image[proj_x, proj_y, c] = image[orig_x, orig_y, c]
+            else:
+                output_image[proj_x, proj_y] = image[orig_x, orig_y]
 
     return output_image
 
 def adjust_brightness(image, brightness):
     """Điều chỉnh độ sáng của ảnh"""
-    if brightness == 0:
-        return image
-    
-    # Chuyển đổi sang float để tránh overflow
-    image_float = image.astype(np.float32)
-    
-    # Điều chỉnh độ sáng
-    adjusted = image_float + brightness
-    
-    # Đảm bảo giá trị pixel trong khoảng [0, 255]
-    adjusted = np.clip(adjusted, 0, 255)
-    
-    return adjusted.astype(np.uint8)
+    try:
+        if brightness == 0:
+            return image
+        
+        # Chuyển đổi sang float để tránh overflow
+        image_float = image.astype(np.float32)
+        
+        # Điều chỉnh độ sáng
+        adjusted = image_float + brightness
+        
+        # Đảm bảo giá trị pixel trong khoảng [0, 255]
+        adjusted = np.clip(adjusted, 0, 255)
+        
+        return adjusted.astype(np.uint8)
+    except Exception as e:
+        logger.error(f"Error in brightness adjustment: {str(e)}")
+        raise
 
 def image_to_base64(image_array):
-    if len(image_array.shape) == 3:
-        image_pil = Image.fromarray(cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB))
-    else:
-        image_pil = Image.fromarray(image_array, mode='L')
-    
-    buffer = io.BytesIO()
-    image_pil.save(buffer, format='PNG')
-    buffer.seek(0)
-    
-    img_base64 = base64.b64encode(buffer.getvalue()).decode()
-    return f"data:image/png;base64,{img_base64}"
+    """Chuyển đổi numpy array thành base64 string"""
+    try:
+        if image_array is None or image_array.size == 0:
+            raise ValueError("Invalid image array")
+            
+        if len(image_array.shape) == 3:
+            image_pil = Image.fromarray(cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB))
+        else:
+            image_pil = Image.fromarray(image_array, mode='L')
+        
+        buffer = io.BytesIO()
+        image_pil.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+        return f"data:image/png;base64,{img_base64}"
+    except Exception as e:
+        logger.error(f"Error converting image to base64: {str(e)}")
+        raise
 
 # HTML Template
 HTML_TEMPLATE = '''
@@ -683,89 +739,142 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file selected'})
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file selected'})
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'No file selected'})
+        
+        if file and allowed_file(file.filename):
+            # Tạo tên file unique để tránh xung đột
+            filename = str(uuid.uuid4()) + '_' + secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            
+            # Đọc ảnh
+            image = cv2.imread(filepath)
+            if image is None:
+                os.remove(filepath)  # Xóa file không hợp lệ
+                return jsonify({'success': False, 'error': 'Cannot read image file'})
+            
+            # Resize ảnh nếu quá lớn
+            max_size = 600
+            height, width = image.shape[:2]
+            if max(height, width) > max_size:
+                scale = max_size / max(height, width)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                image = cv2.resize(image, (new_width, new_height))
+                cv2.imwrite(filepath, image)
+            
+            image_base64 = image_to_base64(image)
+            
+            return jsonify({
+                'success': True,
+                'image': image_base64,
+                'filename': filename
+            })
+        
+        return jsonify({'success': False, 'error': 'Invalid file type'})
     
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'})
-    
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        
-        # Đọc ảnh
-        image = cv2.imread(filepath)
-        if image is None:
-            return jsonify({'error': 'Cannot read image file'})
-        
-        # Resize ảnh nếu quá lớn
-        max_size = 600
-        height, width = image.shape[:2]
-        if max(height, width) > max_size:
-            scale = max_size / max(height, width)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            image = cv2.resize(image, (new_width, new_height))
-            cv2.imwrite(filepath, image)
-        
-        image_base64 = image_to_base64(image)
-        
-        return jsonify({
-            'success': True,
-            'image': image_base64,
-            'filename': filename
-        })
-    
-    return jsonify({'error': 'Invalid file type'})
+    except Exception as e:
+        logger.error(f"Error in upload_file: {str(e)}")
+        return jsonify({'success': False, 'error': f'Upload error: {str(e)}'})
 
 @app.route('/process', methods=['POST'])
 def process_image():
     try:
         data = request.json
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'})
+            
         filename = data.get('filename')
         process_type = data.get('type')
         
         if not filename:
-            return jsonify({'error': 'No filename provided'})
+            return jsonify({'success': False, 'error': 'No filename provided'})
         
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         if not os.path.exists(filepath):
-            return jsonify({'error': 'File not found'})
+            return jsonify({'success': False, 'error': 'File not found'})
         
         # Đọc ảnh
         image = cv2.imread(filepath)
         if image is None:
-            return jsonify({'error': 'Cannot read image file'})
+            return jsonify({'success': False, 'error': 'Cannot read image file'})
         
-        # Xử lý theo loại
+        processed_image = None
+        
         if process_type == '2d':
             angle = data.get('angle', 0)
             rotation = ImageRotation(image)
             processed_image = rotation.givens_rotation_2d(angle)
+            
         elif process_type == '3d':
             alpha = data.get('alpha', 0)
             theta = data.get('theta', 0)
             gamma = data.get('gamma', 0)
+            
             rotation = ImageRotation(image)
             processed_image = rotation.rotate_image_3d(alpha, theta, gamma)
+            
         elif process_type == 'brightness':
             brightness = data.get('brightness', 0)
             processed_image = adjust_brightness(image, brightness)
+            
         else:
-            return jsonify({'error': 'Invalid process type'})
+            return jsonify({'success': False, 'error': 'Invalid process type'})
         
-        # Chuyển đổi thành base64
-        result_base64 = image_to_base64(processed_image)
+        if processed_image is None or processed_image.size == 0:
+            return jsonify({'success': False, 'error': 'Processing failed'})
+        
+        # Chuyển đổi sang base64
+        image_base64 = image_to_base64(processed_image)
         
         return jsonify({
             'success': True,
-            'image': result_base64
+            'image': image_base64
         })
     
     except Exception as e:
-        return jsonify({'error': str(e)})
+        logger.error(f"Error in process_image: {str(e)}")
+        return jsonify({'success': False, 'error': f'Processing error: {str(e)}'})
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({'success': False, 'error': 'File too large. Maximum size is 16MB'}), 413
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'success': False, 'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.error(f"Internal server error: {str(e)}")
+    return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    try:
+        # Kiểm tra các dependency cần thiết
+        import cv2
+        import numpy as np
+        import numba as nb
+        from PIL import Image
+        
+        logger.info("Starting Flask application...")
+        logger.info("All dependencies loaded successfully")
+        
+        # Chạy app với debug mode cho development
+        app.run(debug=True, host='0.0.0.0', port=5000)
+        
+    except ImportError as e:
+        logger.error(f"Missing dependency: {str(e)}")
+        print(f"Error: Missing required dependency - {str(e)}")
+        print("Please install missing packages using pip:")
+        print("pip install opencv-python numpy numba pillow flask")
+        
+    except Exception as e:
+        logger.error(f"Failed to start application: {str(e)}")
+        print(f"Error starting application: {str(e)}")
