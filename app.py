@@ -1,4 +1,4 @@
-code này : import numpy as np
+ import numpy as np
 import cv2
 import numba as nb
 import gdown
