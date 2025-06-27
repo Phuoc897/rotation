@@ -27,7 +27,9 @@ class ImageRotation:
 
     def centering_image(self, pixels):
         center = np.mean(pixels, axis=0)
-        return pixels - center    def rotate_image_2d(self, angle=0):
+        return pixels - center
+
+    def rotate_image_2d(self, angle=0):
         """
         Xoay 2D sử dụng OpenCV để đảm bảo chất lượng tốt.
         :param angle: góc xoay (độ)
@@ -52,7 +54,8 @@ class ImageRotation:
         R_x = self.givens_matrix(0, 2, alpha)
         R_y = self.givens_matrix(1, 2, theta)
         R_z = self.givens_matrix(0, 1, gamma)
-        return self.centering_image(self.pixels) @ R_x @ R_y @ R_z
+        pts_centered = self.centering_image(self.pixels)
+        return pts_centered @ R_x @ R_y @ R_z
 
     def initialize_projection(self, max_angle):
         max_dim = max(self.height, self.width)
@@ -72,17 +75,21 @@ class ImageRotation:
         fx = self.camera_matrix[0,0]
         cx, cy = self.camera_matrix[0,2], self.camera_matrix[1,2]
         u, v = fx * x + cx, fx * y + cy
-        pts2d = np.vstack((u,v)).T.astype(int)
+        pts2d = np.vstack((u, v)).T.astype(int)
         pts2d -= pts2d.min(axis=0)
         return pts2d
 
     def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
+        """
+        Xoay 3D bằng Givens và chiếu xuống 2D.
+        """
         a, t, g = np.deg2rad([alpha, theta, gamma])
         rotated3d = self.givens_rotation_3d(a, t, g)
         max_ang = max(abs(alpha), abs(theta), abs(gamma))
         self.initialize_projection(max_ang)
         pts2d = self.project_points(rotated3d)
-        h_out, w_out = pts2d[:,0].max()+1, pts2d[:,1].max()+1
+        # Tạo canvas
+        h_out, w_out = pts2d[:,0].max() + 1, pts2d[:,1].max() + 1
         channels = 3 if self.image.ndim == 3 else 1
         canvas = np.ones((h_out, w_out, channels), dtype=self.image.dtype) * 255
         return assign_pixels_nb(self.pixels, pts2d, self.image, canvas)
