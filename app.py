@@ -3,28 +3,15 @@ import cv2
 import numba as nb
 import gdown
 import streamlit as st
-import plotly.graph_objects as go
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
-    def __init__(self, image: np.ndarray):
-        # image already resized and in RGB
+    def __init__(self, image: np.ndarray, block_size: int = 256):
         self.image = image
-        self.height, self.width = image.shape[:2]
+        self.h, self.w = image.shape[:2]
+        self.block_size = block_size
 
-        # tạo meshgrid bằng float32 để giảm bộ nhớ
-        y, x = np.meshgrid(
-            np.arange(self.height, dtype=np.float32),
-            np.arange(self.width,  dtype=np.float32),
-            indexing='ij'
-        )
-        z = np.zeros_like(x, dtype=np.float32)
-        self.pixels = np.vstack((
-            x.ravel(),
-            y.ravel(),
-            z.ravel()
-        )).T  # dtype float32
-
+    @st.experimental_memo
     def givens_matrix(self, i, j, theta):
         if i == j or i < 0 or j < 0 or i > 2 or j > 2:
             raise ValueError("Invalid Givens indices")
@@ -37,11 +24,31 @@ class ImageRotation:
         G[i, j], G[j, i] = s, -s
         return G
 
-    def centering_image(self, pixels):
-        center = np.array([self.width/2, self.height/2, 0], dtype=np.float32)
-        return pixels - center
+    def centering(self, pts):
+        center = np.array([self.w/2, self.h/2, 0], dtype=np.float32)
+        return pts - center
+
+    def initialize_projection(self, max_angle):
+        d = max(self.h, self.w)
+        self.f = float(d * 1.5 * (1 + max_angle/90))
+        self.cx, self.cy = self.w/2, self.h/2
+
+    def project(self, pts3d):
+        cam = pts3d.copy()
+        cam[:, 2] += self.f * 2
+        valid = cam[:, 2] > 0.1
+        cam = cam[valid]
+        if cam.size == 0:
+            return np.empty((0,2), dtype=np.int32), valid
+        x_p = cam[:,0] / cam[:,2]
+        y_p = cam[:,1] / cam[:,2]
+        u = self.f * x_p + self.cx
+        v = self.f * y_p + self.cy
+        pts2d = np.vstack((u, v)).T.astype(np.int32)
+        return pts2d, valid
 
     def rotate_image_2d(self, angle=0):
+        # Gốc algorithm giữ nguyên
         h, w = self.image.shape[:2]
         rad = np.deg2rad(angle)
         cos, sin = np.abs(np.cos(rad)), np.abs(np.sin(rad))
@@ -50,150 +57,113 @@ class ImageRotation:
         M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
         M[0, 2] += (new_w - w) / 2
         M[1, 2] += (new_h - h) / 2
-        return cv2.warpAffine(
-            self.image, M, (new_w, new_h),
-            flags=cv2.INTER_LINEAR,
-            borderValue=(255,255,255)
-        )
+        return cv2.warpAffine(self.image, M, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=(255,255,255))
 
-    def givens_rotation_3d(self, a, t, g):
+    def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
+        # Gốc algorithm tính R_x,R_y,R_z
+        a, t, g = np.deg2rad([alpha, theta, gamma], dtype=np.float32)
         R_x = self.givens_matrix(1, 2, a)
         R_y = self.givens_matrix(0, 2, t)
         R_z = self.givens_matrix(0, 1, g)
-        pts = self.centering_image(self.pixels)
-        return pts @ R_z @ R_y @ R_x
+        max_ang = max(abs(alpha), abs(theta), abs(gamma))
+        self.initialize_projection(max_ang)
 
-    def initialize_projection(self, max_angle):
-        d = max(self.height, self.width)
-        self.focal_length = float(d * 1.5 * (1 + max_angle/90))
-        cx, cy = self.width/2, self.height/2
-        self.camera_matrix = np.array([
-            [self.focal_length, 0, cx],
-            [0, self.focal_length, cy],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        # Tính canvas size qua block-processing nhưng giữ thuật toán gốc
+        max_u = max_v = 0
+        for y0 in range(0, self.h, self.block_size):
+            for x0 in range(0, self.w, self.block_size):
+                ys = min(self.block_size, self.h - y0)
+                xs = min(self.block_size, self.w - x0)
+                # create tile points
+                yy, xx = np.meshgrid(
+                    np.arange(ys, dtype=np.float32),
+                    np.arange(xs, dtype=np.float32), indexing='ij'
+                )
+                zz = np.zeros_like(xx)
+                pts = np.vstack((xx.ravel()+x0, yy.ravel()+y0, zz.ravel())).T
+                pts_c = self.centering(pts)
+                pts3d = pts_c @ R_z @ R_y @ R_x
+                pts2d, _ = self.project(pts3d)
+                if pts2d.size:
+                    max_u = max(max_u, pts2d[:,0].max())
+                    max_v = max(max_v, pts2d[:,1].max())
+        Hc, Wc = max_v+1, max_u+1
+        canvas = np.full((Hc, Wc, *self.image.shape[2:]), 255, dtype=self.image.dtype)
 
-    def project_points(self, pts3d):
-        cam = pts3d.copy()
-        cam[:, 2] += self.focal_length * 2
-        valid = cam[:, 2] > 0.1
-        cam = cam[valid]
-        if cam.size == 0:
-            return np.empty((0,2), int), valid
-        x_proj = cam[:,0] / cam[:,2]
-        y_proj = cam[:,1] / cam[:,2]
-        u = self.focal_length * x_proj + self.camera_matrix[0,2]
-        v = self.focal_length * y_proj + self.camera_matrix[1,2]
-        pts2d = np.vstack((u, v)).T.astype(np.int32)
-        min_u, min_v = pts2d.min(axis=0)
-        if min_u < 0: pts2d[:,0] -= int(min_u)
-        if min_v < 0: pts2d[:,1] -= int(min_v)
-        return pts2d, valid
-
-    def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
-        a, t, g = np.deg2rad([alpha, theta, gamma], dtype=np.float32)
-        pts3d = self.givens_rotation_3d(a, t, g)
-        self.initialize_projection(max(abs(alpha), abs(theta), abs(gamma)))
-        pts2d, mask = self.project_points(pts3d)
-        if pts2d.size == 0:
-            return np.ones_like(self.image) * 255
-        H, W = pts2d[:,1].max()+1, pts2d[:,0].max()+1
-        canvas = np.full(
-            (max(H,1), max(W,1), *self.image.shape[2:]),
-            255, dtype=self.image.dtype
-        )
-        return assign_pixels_nb(self.pixels[mask], pts2d, self.image, canvas)
-
-@nb.njit(parallel=True)
-def assign_pixels_nb(pixels, pts2d, img, out):
-    H, W = out.shape[:2]
-    for i in nb.prange(pixels.shape[0]):
-        x, y = int(pixels[i,0]), int(pixels[i,1])
-        u, v = pts2d[i]
-        if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and 0 <= u < W and 0 <= v < H:
-            if img.ndim == 3:
-                out[v, u] = img[y, x]
-            else:
-                out[v, u] = img[y, x]
-    return out
+        # Gán pixel từng block theo gốc algorithm
+        for y0 in range(0, self.h, self.block_size):
+            for x0 in range(0, self.w, self.block_size):
+                ys = min(self.block_size, self.h - y0)
+                xs = min(self.block_size, self.w - x0)
+                yy, xx = np.meshgrid(
+                    np.arange(ys, dtype=np.float32),
+                    np.arange(xs, dtype=np.float32), indexing='ij'
+                )
+                zz = np.zeros_like(xx)
+                pts = np.vstack((xx.ravel()+x0, yy.ravel()+y0, zz.ravel())).T
+                pts_c = self.centering(pts)
+                pts3d = pts_c @ R_z @ R_y @ R_x
+                pts2d, mask = self.project(pts3d)
+                valid_src = pts.astype(int)[mask]
+                for idx, (u, v) in enumerate(pts2d):
+                    x_s, y_s = valid_src[idx]
+                    canvas[v, u] = self.image[y_s, x_s]
+        return canvas
 
 # --------------------- Streamlit UI ---------------------
-st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide")
 st.title("🎨 Ứng dụng Xoay ảnh và Chỉnh sáng")
 
 sidebar = st.sidebar
-che_do = sidebar.radio("Chế độ xoay", ["2D", "3D"])
 do_sang = sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
-
+che_do = sidebar.radio("Chế độ xoay", ["2D","3D"])
 if che_do == "2D":
-    goc = sidebar.slider("Góc xoay (độ)", -180, 180, 0)
+    goc = sidebar.slider("Góc xoay (°)", -180,180,0)
 else:
-    alpha = sidebar.slider("Alpha (X)", -45, 45, 0)
-    theta = sidebar.slider("Theta (Y)", -45, 45, 0)
-    gamma = sidebar.slider("Gamma (Z)", -45, 45, 0)
+    alpha = sidebar.slider("Alpha (X)", -45,45,0)
+    theta = sidebar.slider("Theta (Y)", -45,45,0)
+    gamma = sidebar.slider("Gamma (Z)", -45,45,0)
 
-uploaded = st.file_uploader("Tải ảnh lên", type=['jpg','jpeg','png','bmp','tiff'])
-
+uploaded = st.file_uploader("Tải ảnh lên", type=['jpg','png','jpeg','bmp','tiff'])
 if uploaded:
-    # Đọc ảnh
-    data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
+    data = np.frombuffer(uploaded.read(), np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
-
     if img is None:
-        st.error("Định dạng file không được hỗ trợ hoặc file bị lỗi.")
+        st.error("File không hợp lệ!")
     else:
-        # Chuyển màu
-        if img.ndim == 3:
+        if img.ndim==3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # ——— THÊM: resize ảnh về max 800px cạnh dài nhất ———
-        h, w = img.shape[:2]
-        max_side = 800
-        scale = min(1.0, max_side / max(h, w))
-        if scale < 1.0:
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        # ——————————————————————————
-
-        # Hiển thị ảnh gốc
+        # resize input
+        max_side=800
+        h,w=img.shape[:2]
+        scl=min(1.0, max_side/max(h,w))
+        if scl<1.0:
+            img=cv2.resize(img,None,fx=scl,fy=scl,interpolation=cv2.INTER_AREA)
         st.subheader("Ảnh gốc")
         st.image(img, width=300)
-
-        # Khởi tạo xoay
-        rotation = ImageRotation(img)
-
-        if che_do == "2D":
-            if sidebar.button("Xoay 2D") or goc != 0:
-                try:
-                    out = rotation.rotate_image_2d(goc)
-                    out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-                    st.subheader(f"Kết quả 2D: Góc={goc}°, Độ sáng={do_sang}")
-                    st.image(out, width=300)
-                except Exception as e:
-                    st.error(f"Lỗi xoay 2D: {e}")
+        rot=ImageRotation(img)
+        if che_do=="2D":
+            if sidebar.button("Xoay 2D") or goc!=0:
+                out=rot.rotate_image_2d(goc)
+                out=cv2.convertScaleAbs(out,alpha=do_sang)
+                st.subheader(f"KQ 2D: góc={goc}°, sáng={do_sang}")
+                st.image(out, width=300)
         else:
-            if sidebar.button("Xoay 3D") or alpha!=0 or theta!=0 or gamma!=0:
-                try:
-                    out = rotation.rotate_image_3d(alpha, theta, gamma)
-                    out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-                    st.subheader(f"Kết quả 3D: α={alpha}°, θ={theta}°, γ={gamma}°, Độ sáng={do_sang}")
-                    st.image(out, width=400)
-                except Exception as e:
-                    st.error(f"Lỗi xoay 3D: {e}")
-
+            if sidebar.button("Xoay 3D") or alpha or theta or gamma:
+                out=rot.rotate_image_3d(alpha,theta,gamma)
+                out=cv2.convertScaleAbs(out,alpha=do_sang)
+                st.subheader(f"KQ 3D: α={alpha}°, θ={theta}°, γ={gamma}°, sáng={do_sang}")
+                st.image(out, width=400)
 else:
-    st.info("Vui lòng tải ảnh lên để bắt đầu.")
+    st.info("Vui lòng tải ảnh lên.")
 
-# Sample images
 with st.expander("Tải ảnh mẫu"):
-    if st.button("Tải ảnh mẫu qua Google Drive"):
-        try:
-            samples = [
-                ("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE", "sample1.jpg"),
-                ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ", "sample2.jpg")
-            ]
-            for gid, fname in samples:
-                url = f"https://drive.google.com/uc?id={gid}"
-                gdown.download(url, fname, quiet=True)
-            st.success("Tải xong ảnh mẫu!")
-        except Exception as e:
-            st.error(f"Lỗi tải ảnh mẫu: {e}")
+    if st.button("Tải ảnh mẫu qua Drive"):
+        samples=[
+            ("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE","sample1.jpg"),
+            ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ","sample2.jpg")
+        ]
+        for gid,fname in samples:
+            url=f"https://drive.google.com/uc?id={gid}"
+            gdown.download(url,fname,quiet=True)
+        st.success("Đã tải mẫu!")
