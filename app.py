@@ -1,383 +1,771 @@
-import streamlit as st
+from flask import Flask, render_template_string, request, jsonify
+import os
+import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+import numba as nb
+from werkzeug.utils import secure_filename
+import base64
 import io
-import math
+from PIL import Image
 
-# Cấu hình trang
-st.set_page_config(
-    page_title="🌐 Givens Rotation 3D Editor",
-    page_icon="🌐",
-    layout="wide"
-)
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# CSS styling
-st.markdown("""
-<style>
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .control-panel {
-        background: #f8f9fa;
-        border-radius: 10px;
-        padding: 20px;
-        margin: 10px 0;
-        border: 1px solid #dee2e6;
-    }
-    .matrix-display {
-        background: #1e1e1e;
-        color: #00ff41;
-        font-family: 'Courier New', monospace;
-        padding: 15px;
-        border-radius: 8px;
-        margin: 10px 0;
-        font-size: 11px;
-        line-height: 1.3;
-    }
-    .info-box {
-        background: #e3f2fd;
-        border-left: 4px solid #2196f3;
-        padding: 12px;
-        margin: 10px 0;
-        border-radius: 4px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Tạo thư mục uploads nếu chưa tồn tại
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Header
-st.markdown("""
-<div class="main-header">
-    <h1>🌐 Givens Rotation 3D Editor</h1>
-    <p>Áp dụng phép biến đổi Givens Rotation 3D để tạo hiệu ứng không gian ba chiều</p>
-</div>
-""", unsafe_allow_html=True)
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 
-# =================== GIVENS ROTATION 3D FUNCTIONS ===================
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def givens_rotation_3d(angle_deg, plane='xy'):
-    """Tạo ma trận Givens rotation 3D cho các mặt phẳng khác nhau"""
-    theta = np.radians(angle_deg)
-    c = np.cos(theta)
-    s = np.sin(theta)
-    
-    if plane == 'xy':  # Rotation trong mặt phẳng XY (quanh trục Z)
-        return np.array([
-            [c, -s, 0],
-            [s,  c, 0],
-            [0,  0, 1]
-        ], dtype=np.float64)
-    elif plane == 'xz':  # Rotation trong mặt phẳng XZ (quanh trục Y)
-        return np.array([
-            [c,  0, s],
-            [0,  1, 0],
-            [-s, 0, c]
-        ], dtype=np.float64)
-    elif plane == 'yz':  # Rotation trong mặt phẳng YZ (quanh trục X)
-        return np.array([
-            [1, 0,  0],
-            [0, c, -s],
-            [0, s,  c]
-        ], dtype=np.float64)
+class ImageRotation:
+    def __init__(self, image: np.array):
+        self.image = image
+        self.height = self.image.shape[0]
+        self.width = self.image.shape[1]
+        self.channel = self.image.shape[2] if len(self.image.shape) > 2 else 1
 
-def simple_gaussian_blur(arr, sigma=1.0):
-    """Simple Gaussian blur implementation without scipy"""
-    if sigma <= 0:
-        return arr
-    
-    # Create simple Gaussian kernel
-    kernel_size = int(2 * sigma * 3) + 1
-    kernel = np.zeros((kernel_size, kernel_size))
-    center = kernel_size // 2
-    
-    # Fill kernel
-    for i in range(kernel_size):
-        for j in range(kernel_size):
-            x, y = i - center, j - center
-            distance_sq = x*x + y*y
-            kernel[i, j] = math.exp(-distance_sq / (2 * sigma * sigma))
-    
-    # Normalize kernel
-    kernel = kernel / np.sum(kernel)
-    
-    # Apply convolution manually (simple version)
-    height, width = arr.shape
-    result = np.zeros_like(arr)
-    pad = kernel_size // 2
-    
-    for i in range(pad, height - pad):
-        for j in range(pad, width - pad):
-            # Apply kernel
-            value = 0.0
-            for ki in range(kernel_size):
-                for kj in range(kernel_size):
-                    pi, pj = i - pad + ki, j - pad + kj
-                    if 0 <= pi < height and 0 <= pj < width:
-                        value += arr[pi, pj] * kernel[ki, kj]
-            result[i, j] = value
-    
-    return result
+        # Tạo tọa độ cho từng pixel trong ảnh
+        x, y = np.meshgrid(range(self.height), range(self.width))
+        z = np.zeros_like(x)
+        self.pixels = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
 
-def create_givens_3d_effect(image, xy_angle, xz_angle, yz_angle, depth_strength=0.3, brightness=1.0, quality='normal'):
-    """
-    Tạo hiệu ứng 3D bằng cách áp dụng nhiều Givens rotations
-    Phiên bản đơn giản không cần scipy
-    """
+    def givens_matrix(self, i, j, theta):
+        if i < 0 or i > 2 or j < 0 or j > 2 or i == j:
+            raise ValueError("Indices i and j must be different and in the range [0, 2].")
+        if i > j:
+            i, j = j, i
+
+        G = np.identity(3)
+        c, s = np.cos(theta), np.sin(theta)
+        G[i, i] = c
+        G[j, j] = c
+        G[i, j] = s
+        G[j, i] = -s
+        return G
+
+    def givens_matrix_2d(self, theta):
+        c, s = np.cos(theta), np.sin(theta)
+        return np.array([[c, -s], [s, c]])
+
+    def givens_rotation_2d(self, theta):
+        theta_rad = np.deg2rad(theta)
+        rotation_matrix = self.givens_matrix_2d(theta_rad)
+        
+        center_x, center_y = self.height // 2, self.width // 2
+        
+        # Tạo tọa độ pixel 2D
+        y_coords, x_coords = np.meshgrid(range(self.width), range(self.height))
+        coords = np.stack([x_coords.flatten() - center_x, y_coords.flatten() - center_y])
+        
+        # Xoay tọa độ
+        rotated_coords = rotation_matrix @ coords
+        rotated_coords[0] += center_x
+        rotated_coords[1] += center_y
+        
+        # Tính kích thước ảnh đầu ra
+        min_x, max_x = int(np.min(rotated_coords[0])), int(np.max(rotated_coords[0]))
+        min_y, max_y = int(np.min(rotated_coords[1])), int(np.max(rotated_coords[1]))
+        
+        output_height = max_x - min_x + 1
+        output_width = max_y - min_y + 1
+        
+        # Điều chỉnh tọa độ để không âm
+        rotated_coords[0] -= min_x
+        rotated_coords[1] -= min_y
+        
+        # Tạo ảnh đầu ra
+        if len(self.image.shape) == 3:
+            output_image = np.zeros((output_height, output_width, self.image.shape[2]), dtype=self.image.dtype)
+        else:
+            output_image = np.zeros((output_height, output_width), dtype=self.image.dtype)
+        
+        # Map pixel values với interpolation cơ bản
+        for i in range(len(coords[0])):
+            orig_x = i // self.width
+            orig_y = i % self.width
+            new_x = int(rotated_coords[0][i])
+            new_y = int(rotated_coords[1][i])
+            
+            if 0 <= new_x < output_height and 0 <= new_y < output_width:
+                if len(self.image.shape) == 3:
+                    output_image[new_x, new_y] = self.image[orig_x, orig_y]
+                else:
+                    output_image[new_x, new_y] = self.image[orig_x, orig_y]
+        
+        return output_image
+
+    def givens_rotation(self, pixels, alpha, theta, gamma):
+        Ry = self.givens_matrix(1, 2, theta)
+        Rx = self.givens_matrix(0, 2, alpha)
+        Rz = self.givens_matrix(0, 1, gamma)
+
+        pixels = self.centering_image(pixels)
+        return pixels @ Rx @ Ry @ Rz
+
+    def centering_image(self, pixels):
+        center = np.mean(pixels, axis=0)
+        return pixels - center
+
+    def projectPoints(self, object_point, camera_matrix):
+        tvec = np.array([0, 0, self.focal_length * 1.5], dtype=np.float32)
+        X_cam = object_point.T + tvec.reshape(3,1)
+
+        x = X_cam[0] / X_cam[2]
+        y = X_cam[1] / X_cam[2]
+
+        fx = camera_matrix[0,0]
+        cx, cy = camera_matrix[0,2], camera_matrix[1,2]
+
+        u = fx * x + cx
+        v = fx * y + cy
+        return np.stack([u, v], axis=1)
+
+    def initialize_projection_parameters(self, max_angle):
+        if max_angle < 0 or max_angle > 90:
+            raise ValueError("max_angle must be in the range [0, 90].")
+
+        max_dim = max(self.image.shape[0], self.image.shape[1])
+        angle_factor = 1 + max_angle / 90
+        self.focal_length = max_dim * 1.2 * angle_factor
+        self.center = (self.height/2, self.width/2)
+        self.camera_matrix = np.array([
+            [self.focal_length, 0, self.center[0]],
+            [0, self.focal_length, self.center[1]],
+            [0, 0, 1]
+        ], dtype=np.float32)
+
+    def rotate_image_3d(self, alpha:int=0, theta:int=0, gamma:int=0):
+        if alpha < -90 or alpha > 90 or theta < -90 or theta > 90 or gamma < -90 or gamma > 90:
+            raise ValueError("Góc xoay phải nằm trong khoảng [-90, 90] độ.")
+
+        self.alpha = np.deg2rad(alpha)
+        self.theta = np.deg2rad(theta)
+        self.gamma = np.deg2rad(gamma)
+
+        rotated_pixels = self.givens_rotation(self.pixels.copy(), self.alpha, self.theta, self.gamma)
+        self.initialize_projection_parameters(np.max(np.abs([alpha, theta, gamma])))
+
+        self.projected_points = self.projectPoints(rotated_pixels, self.camera_matrix).astype(int)
+        self.projected_points -= np.min(self.projected_points, axis=0)
+
+        max_height = np.max(self.projected_points[:, 0]) + 1
+        max_width = np.max(self.projected_points[:, 1]) + 1
+
+        if len(self.image.shape) > 2:
+            self.output_image = np.zeros((max_height, max_width, self.image.shape[2]), dtype=self.image.dtype) + 255
+        else:
+            self.output_image = np.zeros((max_height, max_width), dtype=self.image.dtype) + 255
+
+        self.output_image = assign_pixels_parallel(self.pixels, self.projected_points, self.image, self.output_image)
+        return self.output_image
+
+@nb.njit(parallel=True)
+def assign_pixels_parallel(pixels, projected_points, image, output_image):
+    for i in nb.prange(len(pixels)):
+        orig_x = int(pixels[i, 0])
+        orig_y = int(pixels[i, 1])
+        proj_x = projected_points[i, 0]
+        proj_y = projected_points[i, 1]
+
+        if image.ndim == 3:
+            for c in range(image.shape[2]):
+                output_image[proj_x, proj_y, c] = image[orig_x, orig_y, c]
+        else:
+            output_image[proj_x, proj_y] = image[orig_x, orig_y]
+
+    return output_image
+
+def adjust_brightness(image, brightness):
+    """Điều chỉnh độ sáng của ảnh"""
+    if brightness == 0:
+        return image
+    
+    # Chuyển đổi sang float để tránh overflow
+    image_float = image.astype(np.float32)
     
     # Điều chỉnh độ sáng
-    if brightness != 1.0:
-        enhancer = ImageEnhance.Brightness(image)
-        image = enhancer.enhance(brightness)
+    adjusted = image_float + brightness
     
-    width, height = image.size
+    # Đảm bảo giá trị pixel trong khoảng [0, 255]
+    adjusted = np.clip(adjusted, 0, 255)
     
-    # Tạo depth map từ luminance
-    gray_img = image.convert('L')
-    depth_map = np.array(gray_img) / 255.0
-    
-    # Simple smooth cho depth map (thay thế scipy)
-    if quality in ['high', 'ultra']:
-        depth_map = simple_gaussian_blur(depth_map, sigma=1.0)
-    
-    # Tạo mesh grid với density phù hợp
-    if quality == 'ultra':
-        step = 1
-    elif quality == 'high':
-        step = 2
+    return adjusted.astype(np.uint8)
+
+def image_to_base64(image_array):
+    if len(image_array.shape) == 3:
+        image_pil = Image.fromarray(cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB))
     else:
-        step = 4
+        image_pil = Image.fromarray(image_array, mode='L')
     
-    # Tạo 3D mesh coordinates
-    mesh_points = []
-    mesh_colors = []
+    buffer = io.BytesIO()
+    image_pil.save(buffer, format='PNG')
+    buffer.seek(0)
     
-    for y in range(0, height, step):
-        for x in range(0, width, step):
-            # Normalized coordinates [-1, 1]
-            norm_x = (x / width - 0.5) * 2.0
-            norm_y = (y / height - 0.5) * 2.0
-            norm_z = depth_map[y, x] * depth_strength  # Depth dựa trên brightness
+    img_base64 = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:image/png;base64,{img_base64}"
+
+# HTML Template
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Processing Tool</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .upload-section {
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .file-input-button {
+            background: linear-gradient(45deg, #FF6B6B, #FF8E53);
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .file-input-button:hover {
+            transform: translateY(-2px);
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .control-panel {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #e9ecef;
+        }
+
+        .control-panel h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        .control-group input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #ddd;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .control-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #4CAF50;
+            cursor: pointer;
+        }
+
+        .value-display {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.9em;
+            margin-left: 10px;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        .apply-button {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: bold;
+            width: 100%;
+            transition: all 0.3s ease;
+        }
+
+        .apply-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+        }
+
+        .apply-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .images {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .image-container {
+            text-align: center;
+        }
+
+        .image-container h4 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .image-wrapper {
+            border: 3px dashed #ddd;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 300px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #fafafa;
+        }
+
+        .image-wrapper img {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 8px;
+        }
+
+        .placeholder {
+            color: #999;
+            font-style: italic;
+        }
+
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4CAF50;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .controls {
+                grid-template-columns: 1fr;
+            }
+            .images {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖼️ Image Processing Tool</h1>
+            <p>Xoay ảnh Givens 2D/3D và điều chỉnh độ sáng</p>
+        </div>
+
+        <div class="content">
+            <div class="upload-section">
+                <input type="file" id="fileInput" class="file-input" accept="image/*">
+                <button class="file-input-button" onclick="document.getElementById('fileInput').click()">
+                    📁 Chọn ảnh để upload
+                </button>
+            </div>
+
+            <div class="controls">
+                <div class="control-panel">
+                    <h3>🔄 Xoay 2D</h3>
+                    <div class="control-group">
+                        <label for="angle2d">Góc xoay:</label>
+                        <input type="range" id="angle2d" min="-180" max="180" value="0">
+                        <span class="value-display" id="angle2dValue">0°</span>
+                    </div>
+                    <button class="apply-button" id="apply2d" disabled>Áp dụng 2D</button>
+                </div>
+
+                <div class="control-panel">
+                    <h3>🌐 Xoay 3D</h3>
+                    <div class="control-group">
+                        <label for="alpha">Alpha (X):</label>
+                        <input type="range" id="alpha" min="-90" max="90" value="0">
+                        <span class="value-display" id="alphaValue">0°</span>
+                    </div>
+                    <div class="control-group">
+                        <label for="theta">Theta (Y):</label>
+                        <input type="range" id="theta" min="-90" max="90" value="0">
+                        <span class="value-display" id="thetaValue">0°</span>
+                    </div>
+                    <div class="control-group">
+                        <label for="gamma">Gamma (Z):</label>
+                        <input type="range" id="gamma" min="-90" max="90" value="0">
+                        <span class="value-display" id="gammaValue">0°</span>
+                    </div>
+                    <button class="apply-button" id="apply3d" disabled>Áp dụng 3D</button>
+                </div>
+
+                <div class="control-panel">
+                    <h3>💡 Độ sáng</h3>
+                    <div class="control-group">
+                        <label for="brightness">Độ sáng:</label>
+                        <input type="range" id="brightness" min="-100" max="100" value="0">
+                        <span class="value-display" id="brightnessValue">0</span>
+                    </div>
+                    <button class="apply-button" id="applyBrightness" disabled>Áp dụng độ sáng</button>
+                </div>
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Đang xử lý...</p>
+            </div>
+
+            <div class="images">
+                <div class="image-container">
+                    <h4>Ảnh gốc</h4>
+                    <div class="image-wrapper" id="originalImageWrapper">
+                        <span class="placeholder">Chưa có ảnh</span>
+                    </div>
+                </div>
+                <div class="image-container">
+                    <h4>Ảnh đã xử lý</h4>
+                    <div class="image-wrapper" id="processedImageWrapper">
+                        <span class="placeholder">Chưa có ảnh</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFilename = null;
+
+        // File upload
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    currentFilename = data.filename;
+                    document.getElementById('originalImageWrapper').innerHTML = 
+                        `<img src="${data.image}" alt="Original Image">`;
+                    enableButtons();
+                    resetControls();
+                } else {
+                    showError(data.error);
+                }
+            })
+            .catch(error => {
+                showError('Lỗi upload: ' + error.message);
+            });
+        });
+
+        // Update value displays
+        document.getElementById('angle2d').addEventListener('input', function() {
+            document.getElementById('angle2dValue').textContent = this.value + '°';
+        });
+
+        document.getElementById('alpha').addEventListener('input', function() {
+            document.getElementById('alphaValue').textContent = this.value + '°';
+        });
+
+        document.getElementById('theta').addEventListener('input', function() {
+            document.getElementById('thetaValue').textContent = this.value + '°';
+        });
+
+        document.getElementById('gamma').addEventListener('input', function() {
+            document.getElementById('gammaValue').textContent = this.value + '°';
+        });
+
+        document.getElementById('brightness').addEventListener('input', function() {
+            document.getElementById('brightnessValue').textContent = this.value;
+        });
+
+        // Apply 2D rotation
+        document.getElementById('apply2d').addEventListener('click', function() {
+            if (!currentFilename) return;
             
-            mesh_points.append([norm_x, norm_y, norm_z])
+            const angle = document.getElementById('angle2d').value;
+            processImage({
+                filename: currentFilename,
+                type: '2d',
+                angle: parseInt(angle)
+            });
+        });
+
+        // Apply 3D rotation
+        document.getElementById('apply3d').addEventListener('click', function() {
+            if (!currentFilename) return;
             
-            # Lấy màu pixel
-            try:
-                if image.mode == 'RGB':
-                    color = list(image.getpixel((x, y)))
-                else:
-                    gray_val = image.getpixel((x, y))
-                    color = [gray_val, gray_val, gray_val]
-                mesh_colors.append(color)
-            except:
-                mesh_colors.append([128, 128, 128])
-    
-    mesh_points = np.array(mesh_points)
-    
-    # Áp dụng sequential Givens rotations
-    if xy_angle != 0:
-        R_xy = givens_rotation_3d(xy_angle, 'xy')
-        mesh_points = np.dot(mesh_points, R_xy.T)
-    
-    if xz_angle != 0:
-        R_xz = givens_rotation_3d(xz_angle, 'xz')
-        mesh_points = np.dot(mesh_points, R_xz.T)
-    
-    if yz_angle != 0:
-        R_yz = givens_rotation_3d(yz_angle, 'yz')
-        mesh_points = np.dot(mesh_points, R_yz.T)
-    
-    # Render với simple projection
-    return render_simple_3d(mesh_points, mesh_colors, width, height, step)
-
-def render_simple_3d(vertices, colors, width, height, step):
-    """Render 3D mesh với simple projection"""
-    
-    # Simple perspective projection
-    fov_factor = 0.8  # Field of view factor
-    distance = 2.5
-    
-    projected_points = []
-    
-    for i, vertex in enumerate(vertices):
-        x, y, z = vertex
-        z_cam = z + distance
-        
-        if z_cam > 0.1:
-            # Simple perspective projection
-            px = x / z_cam * fov_factor
-            py = y / z_cam * fov_factor
-        else:
-            px, py = x * 0.3, y * 0.3
-        
-        # Convert to screen coordinates
-        screen_x = int((px + 1) * width * 0.4 + width * 0.1)
-        screen_y = int((1 - py) * height * 0.4 + height * 0.1)
-        
-        # Clamp to screen bounds
-        screen_x = max(0, min(width - 1, screen_x))
-        screen_y = max(0, min(height - 1, screen_y))
-        
-        projected_points.append((screen_x, screen_y, colors[i], z_cam))
-    
-    # Sort by depth (back to front for proper rendering)
-    projected_points.sort(key=lambda p: p[3], reverse=True)
-    
-    # Create result image with gradient background
-    result_img = create_3d_background(width, height)
-    
-    # Render points
-    for screen_x, screen_y, color, depth in projected_points:
-        # Adaptive point size based on depth and step
-        base_size = max(step, 1)
-        depth_factor = max(0.4, min(1.2, distance / (depth + 0.1)))
-        point_size = max(1, int(base_size * depth_factor))
-        
-        # Simple point rendering
-        render_point(result_img, screen_x, screen_y, point_size, color, depth)
-    
-    return result_img
-
-def create_3d_background(width, height):
-    """Tạo background gradient cho 3D effect"""
-    img = Image.new('RGB', (width, height))
-    draw = ImageDraw.Draw(img)
-    
-    # Simple radial gradient
-    center_x, center_y = width // 2, height // 2
-    max_radius = math.sqrt(center_x**2 + center_y**2)
-    
-    for y in range(0, height, 2):  # Skip pixels for performance
-        for x in range(0, width, 2):
-            distance = math.sqrt((x - center_x)**2 + (y - center_y)**2)
-            factor = 1.0 - (distance / max_radius) * 0.6
+            const alpha = document.getElementById('alpha').value;
+            const theta = document.getElementById('theta').value;
+            const gamma = document.getElementById('gamma').value;
             
-            r = int(15 * factor)
-            g = int(25 * factor)
-            b = int(40 * factor)
+            processImage({
+                filename: currentFilename,
+                type: '3d',
+                alpha: parseInt(alpha),
+                theta: parseInt(theta),
+                gamma: parseInt(gamma)
+            });
+        });
+
+        // Apply brightness
+        document.getElementById('applyBrightness').addEventListener('click', function() {
+            if (!currentFilename) return;
             
-            # Draw 2x2 block for efficiency
-            draw.rectangle([x, y, x+1, y+1], fill=(r, g, b))
-    
-    return img
+            const brightness = document.getElementById('brightness').value;
+            processImage({
+                filename: currentFilename,
+                type: 'brightness',
+                brightness: parseInt(brightness)
+            });
+        });
 
-def render_point(img, x, y, size, color, depth):
-    """Render single point với depth-based effects"""
-    draw = ImageDraw.Draw(img)
-    
-    # Adjust color based on depth (closer = brighter)
-    depth_factor = max(0.3, min(1.0, 2.0 / (depth + 0.5)))
-    adjusted_color = [
-        min(255, int(c * depth_factor)) for c in color
-    ]
-    
-    if size <= 1:
-        draw.point([x, y], fill=tuple(adjusted_color))
-    else:
-        # Draw filled circle
-        draw.ellipse([
-            x - size//2, y - size//2,
-            x + size//2, y + size//2
-        ], fill=tuple(adjusted_color))
+        function processImage(data) {
+            showLoading(true);
+            
+            fetch('/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+                showLoading(false);
+                if (result.success) {
+                    document.getElementById('processedImageWrapper').innerHTML = 
+                        `<img src="${result.image}" alt="Processed Image">`;
+                } else {
+                    showError(result.error);
+                }
+            })
+            .catch(error => {
+                showLoading(false);
+                showError('Lỗi xử lý: ' + error.message);
+            });
+        }
 
-def create_composite_rotation_matrix(xy_angle, xz_angle, yz_angle):
-    """Tạo ma trận rotation tổng hợp từ các Givens rotations"""
-    matrices = []
-    
-    if xy_angle != 0:
-        matrices.append(('XY', givens_rotation_3d(xy_angle, 'xy')))
-    if xz_angle != 0:
-        matrices.append(('XZ', givens_rotation_3d(xz_angle, 'xz')))
-    if yz_angle != 0:
-        matrices.append(('YZ', givens_rotation_3d(yz_angle, 'yz')))
-    
-    # Composite matrix
-    if matrices:
-        composite = np.eye(3)
-        for name, matrix in matrices:
-            composite = np.dot(composite, matrix)
-        return matrices, composite
-    
-    return [], np.eye(3)
+        function enableButtons() {
+            document.getElementById('apply2d').disabled = false;
+            document.getElementById('apply3d').disabled = false;
+            document.getElementById('applyBrightness').disabled = false;
+        }
 
-# =================== STREAMLIT UI ===================
+        function resetControls() {
+            document.getElementById('angle2d').value = 0;
+            document.getElementById('alpha').value = 0;
+            document.getElementById('theta').value = 0;
+            document.getElementById('gamma').value = 0;
+            document.getElementById('brightness').value = 0;
+            
+            document.getElementById('angle2dValue').textContent = '0°';
+            document.getElementById('alphaValue').textContent = '0°';
+            document.getElementById('thetaValue').textContent = '0°';
+            document.getElementById('gammaValue').textContent = '0°';
+            document.getElementById('brightnessValue').textContent = '0';
+        }
 
-# Sidebar cho thông tin
-with st.sidebar:
-    st.markdown("### 🌐 Givens Rotation 3D")
-    st.markdown("""
-    **Givens rotation 3D** mở rộng phép xoay 
-    lên không gian ba chiều với 3 mặt phẳng:
-    
-    **Ma trận cho mặt phẳng XY:**
-    ```
-    [cos θ -sin θ  0 ]
-    [sin θ  cos θ  0 ]
-    [ 0     0     1 ]
-    ```
-    
-    **Tính chất:**
-    - Bảo toàn độ dài và góc
-    - Có thể compose nhiều rotations
-    - Stable và invertible
-    """)
-    
-    st.markdown("### 🎯 3D Planes")
-    st.markdown("""
-    - **XY**: Rotation quanh trục Z
-    - **XZ**: Rotation quanh trục Y  
-    - **YZ**: Rotation quanh trục X
-    """)
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
 
-# Upload ảnh
-uploaded_file = st.file_uploader(
-    "📁 Chọn ảnh để áp dụng Givens Rotation 3D", 
-    type=['png', 'jpg', 'jpeg'],
-    help="Hỗ trợ file PNG, JPG, JPEG"
-)
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error';
+            errorDiv.textContent = message;
+            document.querySelector('.content').insertBefore(errorDiv, document.querySelector('.controls'));
+            
+            setTimeout(() => {
+                errorDiv.remove();
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
+'''
 
-if uploaded_file:
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file selected'})
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'})
+    
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        # Đọc ảnh
+        image = cv2.imread(filepath)
+        if image is None:
+            return jsonify({'error': 'Cannot read image file'})
+        
+        # Resize ảnh nếu quá lớn
+        max_size = 600
+        height, width = image.shape[:2]
+        if max(height, width) > max_size:
+            scale = max_size / max(height, width)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            image = cv2.resize(image, (new_width, new_height))
+            cv2.imwrite(filepath, image)
+        
+        image_base64 = image_to_base64(image)
+        
+        return jsonify({
+            'success': True,
+            'image': image_base64,
+            'filename': filename
+        })
+    
+    return jsonify({'error': 'Invalid file type'})
+
+@app.route('/process', methods=['POST'])
+def process_image():
     try:
-        image = Image.open(uploaded_file).convert('RGB')
-        st.image(image, caption="Ảnh gốc", use_column_width=True)
-
-        # Sidebar controls
-        xy_angle = st.slider("Góc xoay XY (quanh trục Z)", -180, 180, 0, 1)
-        xz_angle = st.slider("Góc xoay XZ (quanh trục Y)", -180, 180, 0, 1)
-        yz_angle = st.slider("Góc xoay YZ (quanh trục X)", -180, 180, 0, 1)
-        depth_strength = st.slider("Cồng sâu", 0.0, 1.0, 0.3, 0.01)
-        brightness = st.slider("Độ sáng", 0.5, 2.0, 1.0, 0.05)
-        quality = st.selectbox("Chất lượng render", ['normal', 'high', 'ultra'])
-
-        # Cấu hình lưới và làm mượt
-        if quality == 'ultra':
-            step = 1
-            blur_sigma = 1.2
-        elif quality == 'high':
-            step = 2
-            blur_sigma = 1.0
+        data = request.json
+        filename = data.get('filename')
+        process_type = data.get('type')
+        
+        if not filename:
+            return jsonify({'error': 'No filename provided'})
+        
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'File not found'})
+        
+        # Đọc ảnh
+        image = cv2.imread(filepath)
+        if image is None:
+            return jsonify({'error': 'Cannot read image file'})
+        
+        # Xử lý theo loại
+        if process_type == '2d':
+            angle = data.get('angle', 0)
+            rotation = ImageRotation(image)
+            processed_image = rotation.givens_rotation_2d(angle)
+        elif process_type == '3d':
+            alpha = data.get('alpha', 0)
+            theta = data.get('theta', 0)
+            gamma = data.get('gamma', 0)
+            rotation = ImageRotation(image)
+            processed_image = rotation.rotate_image_3d(alpha, theta, gamma)
+        elif process_type == 'brightness':
+            brightness = data.get('brightness', 0)
+            processed_image = adjust_brightness(image, brightness)
         else:
-            step = 4
-            blur_sigma = 0
+            return jsonify({'error': 'Invalid process type'})
+        
+        # Chuyển đổi thành base64
+        result_base64 = image_to_base64(processed_image)
+        
+        return jsonify({
+            'success': True,
+            'image': result_base64
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
-        # Tạo hiệu ứng 3D xoay
-        gray_img = image.convert('L')
-        depth_map = np.array(gray_img) / 255.0
-        if blur_sigma > 0:
-            depth_map = simple_gaussian_blur(depth_map, sigma=blur_sigma)
-
-        result_img = create_givens_3d_effect(
-            image, xy_angle, xz_angle, yz_angle,
-            depth_strength=depth_strength,
-            brightness=brightness,
-            quality=quality
-        )
-
-        st.image(result_img, caption="Ảnh sau khi xoay 3D", use_column_width=True)
-
-    except:
-        st.error("Ảnh không hợp lệ")
-
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
