@@ -118,7 +118,7 @@ else:
     st.info("Please upload an image to begin.")
 
 # Example: Download sample images
-with st.expander("Download Sample Images"]:
+with st.expander("Download Sample Images"):
     if st.button("Download Samples via gdown"):
         urls = [("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE", "sample1.jpg"),
                 ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ", "sample2.jpg")]
