@@ -3,7 +3,7 @@ import cv2
 import numba as nb
 import gdown
 import streamlit as st
-import plotly.graph_objects as go  # Added for interactive pan/zoom
+import plotly.graph_objects as go  # For interactive pan/zoom
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
@@ -85,7 +85,6 @@ def assign_pixels_nb(pixels, pts2d, img, out):
 st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide", initial_sidebar_state="expanded")
 st.title("🎨 Ứng dụng Xoay ảnh và Chỉnh sáng")
 
-# Controls
 sidebar = st.sidebar
 che_do = sidebar.radio("Chế độ xoay", ["2D", "3D"])
 do_sang = sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
@@ -116,15 +115,8 @@ if uploaded:
         if che_do == "3D" and sidebar.button("Xoay 3D"):
             out = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
             out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-            h, w = out.shape[:2]
-            # Interactive pan/zoom via Plotly
-            fig = go.Figure()
-            fig.add_layout_image(
-                dict(source=cv2.cvtColor(out, cv2.COLOR_BGR2RGB) if out.ndim==3 else out,
-                     x=0, y=0, sizex=w, sizey=h, xref="x", yref="y", sizing="stretch")
-            )
-            fig.update_xaxes(visible=False, range=[0, w])
-            fig.update_yaxes(visible=False, range=[h, 0])
+            # Use Plotly Image trace for interactivity
+            fig = go.Figure(go.Image(z=out))
             fig.update_layout(
                 width=400, height=400,
                 margin=dict(l=0, r=0, t=0, b=0),
