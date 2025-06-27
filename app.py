@@ -84,11 +84,22 @@ def assign_pixels_nb(pixels, pts2d, img, out):
     return out
 
 # --------------------- Giao diện Streamlit ---------------------
-st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide")
+# Mở rộng sidebar mặc định và layout
+st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide", initial_sidebar_state="expanded")
 st.title("🎨 Ứng dụng Xoay ảnh và Chỉnh sáng")
 
-che_do = st.sidebar.radio("Chế độ xoay", ["2D", "3D"])
-do_sang = st.sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
+# Sử dụng container chính cho controls để dễ điều chỉnh kích thước
+controls = st.sidebar.container()
+with controls:
+    che_do = st.radio("Chế độ xoay", ["2D", "3D"])
+    do_sang = st.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
+    if che_do == "2D":
+        goc = st.slider("Góc xoay (độ)", -180, 180, 0)
+    else:
+        alpha = st.slider("Alpha (trục X, °)", -90, 90, 0)
+        theta = st.slider("Theta (trục Y, °)", -90, 90, 0)
+        gamma = st.slider("Gamma (trục Z, °)", -90, 90, 0)
+
 uploaded = st.file_uploader("Tải ảnh lên", type=None)
 
 if uploaded:
@@ -102,18 +113,14 @@ if uploaded:
         st.image(img, use_column_width=False, width=300)
 
         if che_do == "2D":
-            goc = st.sidebar.slider("Góc xoay (độ)", -180, 180, 0)
-            if st.sidebar.button("Xoay 2D"):
+            if st.button("Xoay 2D"):
                 with st.spinner("Đang xoay 2D..."):
                     out = ImageRotation(img).rotate_image_2d(goc)
                     out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
                     st.subheader(f"Ảnh sau xoay 2D (Góc={goc}°, Độ sáng={do_sang})")
                     st.image(out, use_column_width=False, width=300)
         else:
-            alpha = st.sidebar.slider("Alpha (trục X, °)", -90, 90, 0)
-            theta = st.sidebar.slider("Theta (trục Y, °)", -90, 90, 0)
-            gamma = st.sidebar.slider("Gamma (trục Z, °)", -90, 90, 0)
-            if st.sidebar.button("Xoay 3D"):
+            if st.button("Xoay 3D"):
                 with st.spinner("Đang xoay 3D..."):
                     out = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
                     out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
