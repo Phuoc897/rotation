@@ -6,7 +6,7 @@ import streamlit as st
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
-    def __init__(self, image: np.ndarray, block_size: int = 256):
+    def __init__(self, image: np.ndarray, block_size: int = 128):
         self.image = image
         self.h, self.w = image.shape[:2]
         self.block_size = block_size
@@ -17,15 +17,15 @@ class ImageRotation:
             raise ValueError("Invalid Givens indices")
         if i > j:
             i, j = j, i
-        G = np.eye(3, dtype=np.float32)
-        c = np.cos(theta).astype(np.float32)
-        s = np.sin(theta).astype(np.float32)
+        G = np.eye(3, dtype=np.float16)
+        c = np.cos(theta).astype(np.float16)
+        s = np.sin(theta).astype(np.float16)
         G[i, i], G[j, j] = c, c
         G[i, j], G[j, i] = s, -s
         return G
 
     def centering(self, pts):
-        center = np.array([self.w/2, self.h/2, 0], dtype=np.float32)
+        center = np.array([self.w/2, self.h/2, 0], dtype=np.float16)
         return pts - center
 
     def initialize_projection(self, max_angle):
@@ -39,12 +39,12 @@ class ImageRotation:
         valid = cam[:, 2] > 0.1
         cam = cam[valid]
         if cam.size == 0:
-            return np.empty((0,2), dtype=np.int32), valid
+            return np.empty((0,2), dtype=np.int16), valid
         x_p = cam[:,0] / cam[:,2]
         y_p = cam[:,1] / cam[:,2]
         u = self.f * x_p + self.cx
         v = self.f * y_p + self.cy
-        pts2d = np.vstack((u, v)).T.astype(np.int32)
+        pts2d = np.vstack((u, v)).T.astype(np.int16)
         return pts2d, valid
 
     def rotate_image_2d(self, angle=0):
@@ -60,24 +60,22 @@ class ImageRotation:
         return cv2.warpAffine(self.image, M, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=(255,255,255))
 
     def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
-        # Gốc algorithm tính R_x,R_y,R_z
-        a, t, g = np.deg2rad([alpha, theta, gamma], dtype=np.float32)
+        a, t, g = np.deg2rad([alpha, theta, gamma], dtype=np.float16)
         R_x = self.givens_matrix(1, 2, a)
         R_y = self.givens_matrix(0, 2, t)
         R_z = self.givens_matrix(0, 1, g)
         max_ang = max(abs(alpha), abs(theta), abs(gamma))
         self.initialize_projection(max_ang)
 
-        # Tính canvas size qua block-processing nhưng giữ thuật toán gốc
+        # Compute canvas size
         max_u = max_v = 0
         for y0 in range(0, self.h, self.block_size):
             for x0 in range(0, self.w, self.block_size):
                 ys = min(self.block_size, self.h - y0)
                 xs = min(self.block_size, self.w - x0)
-                # create tile points
                 yy, xx = np.meshgrid(
-                    np.arange(ys, dtype=np.float32),
-                    np.arange(xs, dtype=np.float32), indexing='ij'
+                    np.arange(ys, dtype=np.float16),
+                    np.arange(xs, dtype=np.float16), indexing='ij'
                 )
                 zz = np.zeros_like(xx)
                 pts = np.vstack((xx.ravel()+x0, yy.ravel()+y0, zz.ravel())).T
@@ -85,28 +83,28 @@ class ImageRotation:
                 pts3d = pts_c @ R_z @ R_y @ R_x
                 pts2d, _ = self.project(pts3d)
                 if pts2d.size:
-                    max_u = max(max_u, pts2d[:,0].max())
-                    max_v = max(max_v, pts2d[:,1].max())
+                    max_u = max(max_u, int(pts2d[:,0].max()))
+                    max_v = max(max_v, int(pts2d[:,1].max()))
         Hc, Wc = max_v+1, max_u+1
         canvas = np.full((Hc, Wc, *self.image.shape[2:]), 255, dtype=self.image.dtype)
 
-        # Gán pixel từng block theo gốc algorithm
+        # Assign pixels
         for y0 in range(0, self.h, self.block_size):
             for x0 in range(0, self.w, self.block_size):
                 ys = min(self.block_size, self.h - y0)
                 xs = min(self.block_size, self.w - x0)
                 yy, xx = np.meshgrid(
-                    np.arange(ys, dtype=np.float32),
-                    np.arange(xs, dtype=np.float32), indexing='ij'
+                    np.arange(ys, dtype=np.float16),
+                    np.arange(xs, dtype=np.float16), indexing='ij'
                 )
                 zz = np.zeros_like(xx)
                 pts = np.vstack((xx.ravel()+x0, yy.ravel()+y0, zz.ravel())).T
                 pts_c = self.centering(pts)
                 pts3d = pts_c @ R_z @ R_y @ R_x
                 pts2d, mask = self.project(pts3d)
-                valid_src = pts.astype(int)[mask]
+                src = pts.astype(int)[mask]
                 for idx, (u, v) in enumerate(pts2d):
-                    x_s, y_s = valid_src[idx]
+                    x_s, y_s = src[idx]
                     canvas[v, u] = self.image[y_s, x_s]
         return canvas
 
@@ -115,10 +113,10 @@ st.set_page_config(page_title="Xoay ảnh 2D & 3D", layout="wide")
 st.title("🎨 Ứng dụng Xoay ảnh và Chỉnh sáng")
 
 sidebar = st.sidebar
-do_sang = sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
-che_do = sidebar.radio("Chế độ xoay", ["2D","3D"])
-if che_do == "2D":
-    goc = sidebar.slider("Góc xoay (°)", -180,180,0)
+brightness = sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
+mode = sidebar.radio("Chế độ xoay", ["2D","3D"])
+if mode == "2D":
+    angle = sidebar.slider("Góc xoay (°)", -180,180,0)
 else:
     alpha = sidebar.slider("Alpha (X)", -45,45,0)
     theta = sidebar.slider("Theta (Y)", -45,45,0)
@@ -131,39 +129,40 @@ if uploaded:
     if img is None:
         st.error("File không hợp lệ!")
     else:
-        if img.ndim==3:
+        if img.ndim == 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # resize input
-        max_side=800
-        h,w=img.shape[:2]
-        scl=min(1.0, max_side/max(h,w))
-        if scl<1.0:
-            img=cv2.resize(img,None,fx=scl,fy=scl,interpolation=cv2.INTER_AREA)
+        # Resize input max 256px to fit memory
+        max_side = 256
+        h, w = img.shape[:2]
+        scale = min(1.0, max_side / max(h, w))
+        if scale < 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         st.subheader("Ảnh gốc")
-        st.image(img, width=300)
-        rot=ImageRotation(img)
-        if che_do=="2D":
-            if sidebar.button("Xoay 2D") or goc!=0:
-                out=rot.rotate_image_2d(goc)
-                out=cv2.convertScaleAbs(out,alpha=do_sang)
-                st.subheader(f"KQ 2D: góc={goc}°, sáng={do_sang}")
-                st.image(out, width=300)
+        st.image(img, width=200)
+
+        rot = ImageRotation(img)
+        if mode == "2D":
+            if sidebar.button("Xoay 2D") or angle != 0:
+                out = rot.rotate_image_2d(angle)
+                out = cv2.convertScaleAbs(out, alpha=brightness)
+                st.subheader(f"KQ 2D: góc={angle}°, sáng={brightness}")
+                st.image(out, width=200)
         else:
             if sidebar.button("Xoay 3D") or alpha or theta or gamma:
-                out=rot.rotate_image_3d(alpha,theta,gamma)
-                out=cv2.convertScaleAbs(out,alpha=do_sang)
-                st.subheader(f"KQ 3D: α={alpha}°, θ={theta}°, γ={gamma}°, sáng={do_sang}")
-                st.image(out, width=400)
+                out = rot.rotate_image_3d(alpha, theta, gamma)
+                out = cv2.convertScaleAbs(out, alpha=brightness)
+                st.subheader(f"KQ 3D: α={alpha}°, θ={theta}°, γ={gamma}°, sáng={brightness}")
+                st.image(out, width=300)
 else:
     st.info("Vui lòng tải ảnh lên.")
 
 with st.expander("Tải ảnh mẫu"):
     if st.button("Tải ảnh mẫu qua Drive"):
-        samples=[
+        samples = [
             ("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE","sample1.jpg"),
             ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ","sample2.jpg")
         ]
-        for gid,fname in samples:
-            url=f"https://drive.google.com/uc?id={gid}"
-            gdown.download(url,fname,quiet=True)
+        for gid, fname in samples:
+            url = f"https://drive.google.com/uc?id={gid}"
+            gdown.download(url, fname, quiet=True)
         st.success("Đã tải mẫu!")
