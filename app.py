@@ -103,44 +103,44 @@ st.title("🎨 Image Rotation with Givens Transform")
 
 mode = st.sidebar.radio("Rotation Mode", ["2D", "3D"])
 
-# Cho phép upload mọi file, tự kiểm tra đọc ảnh
+# Bỏ type để cho phép upload mọi định dạng
 uploaded = st.file_uploader("Upload an image")
 
 if uploaded:
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
-    # Đọc ảnh nguyên bản, giữ 4 kênh nếu có
     img_raw = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
 
     if img_raw is None:
         st.error("Định dạng file không được hỗ trợ hoặc file bị lỗi.")
+        st.stop()
+
+    # Chuẩn hoá thành RGB
+    if img_raw.ndim == 2:
+        img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2RGB)
+    elif img_raw.shape[2] == 4:
+        img = cv2.cvtColor(img_raw, cv2.COLOR_BGRA2RGB)
     else:
-        # Chuẩn hoá thành RGB 3 kênh
-        if img_raw.ndim == 2:
-            img = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2RGB)
-        elif img_raw.shape[2] == 4:
-            img = cv2.cvtColor(img_raw, cv2.COLOR_BGRA2RGB)
-        else:
-            img = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
+        img = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
 
-        st.subheader("Original Image")
-        st.image(img, use_column_width=True)
+    st.subheader("Original Image")
+    st.image(img, use_column_width=True)
 
-        if mode == "2D":
-            angle2d = st.sidebar.slider("Angle (degrees)", -180, 180, 0)
-            if st.sidebar.button("Rotate 2D"):
-                with st.spinner("Rotating 2D..."):
-                    out2d = ImageRotation(img).rotate_image_2d(angle2d)
-                    st.subheader(f"2D Rotated (θ={angle2d}°)")
-                    st.image(out2d, use_column_width=True)
-        else:
-            alpha = st.sidebar.slider("Alpha (X-axis)", -90, 90, 0)
-            theta = st.sidebar.slider("Theta (Y-axis)", -90, 90, 0)
-            gamma = st.sidebar.slider("Gamma (Z-axis)", -90, 90, 0)
-            if st.sidebar.button("Rotate 3D"):
-                with st.spinner("Rotating 3D..."):
-                    out3d = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
-                    st.subheader(f"3D Rotated (α={alpha}°, θ={theta}°, γ={gamma}°)")
-                    st.image(out3d, use_column_width=True)
+    if mode == "2D":
+        angle2d = st.sidebar.slider("Angle (degrees)", -180, 180, 0)
+        if st.sidebar.button("Rotate 2D"):
+            with st.spinner("Rotating 2D..."):
+                out2d = ImageRotation(img).rotate_image_2d(angle2d)
+                st.subheader(f"2D Rotated (θ={angle2d}°)")
+                st.image(out2d, use_column_width=True)
+    else:
+        alpha = st.sidebar.slider("Alpha (X-axis)", -90, 90, 0)
+        theta = st.sidebar.slider("Theta (Y-axis)", -90, 90, 0)
+        gamma = st.sidebar.slider("Gamma (Z-axis)", -90, 90, 0)
+        if st.sidebar.button("Rotate 3D"):
+            with st.spinner("Rotating 3D..."):
+                out3d = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
+                st.subheader(f"3D Rotated (α={alpha}°, θ={theta}°, γ={gamma}°)")
+                st.image(out3d, use_column_width=True)
 else:
     st.info("Please upload an image to begin.")
 
