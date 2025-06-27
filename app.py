@@ -31,20 +31,26 @@ class ImageRotation:
 
     def rotate_image_2d(self, angle=0):
         """
-        Xoay 2D sử dụng OpenCV để đảm bảo chất lượng tốt.
-        :param angle: góc xoay (độ)
-        :return: ảnh đã xoay giữ kích thước gốc
+        Xoay 2D sử dụng OpenCV, mở rộng canvas để giữ nguyên trọn vẹn ảnh.
         """
-        # Kích thước và tâm ảnh
         (h, w) = self.image.shape[:2]
-        center = (w // 2, h // 2)
-        # Ma trận xoay
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        # Tính bounding box mới
+        rad = np.deg2rad(angle)
+        cos, sin = np.abs(np.cos(rad)), np.abs(np.sin(rad))
+        new_w = int((h * sin) + (w * cos))
+        new_h = int((h * cos) + (w * sin))
+
+        # Tính ma trận affine với dịch chuyển
+        center_orig = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center_orig, angle, 1.0)
+        M[0, 2] += (new_w - w) / 2
+        M[1, 2] += (new_h - h) / 2
+
         # Warp với interpolation tuyến tính và background trắng
         rotated = cv2.warpAffine(
             self.image,
             M,
-            (w, h),
+            (new_w, new_h),
             flags=cv2.INTER_LINEAR,
             borderValue=(255, 255, 255)
         )
@@ -109,10 +115,9 @@ def assign_pixels_nb(pixels, pts2d, img, out):
 # --------------------- Streamlit UI ---------------------
 st.set_page_config(page_title="Image Rotation", layout="wide")
 st.title("🎨 Image Rotation with Givens Transform")
-
-# Sidebar: choose mode
-mode = st.sidebar.radio("Rotation Mode", ["2D", "3D"])
-
+# Sidebar: chọn chế độ
+mode = st.sidebar.radio("Rotation Mode", ["2D", "3D"]
+)
 uploaded = st.file_uploader("Upload an image", type=["png","jpg","jpeg"])
 if uploaded:
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
@@ -140,7 +145,6 @@ if uploaded:
                 st.image(out3d, use_column_width=True)
 else:
     st.info("Please upload an image to begin.")
-
 # Download samples
 with st.expander("Download Sample Images"):
     if st.button("Download via gdown"):
