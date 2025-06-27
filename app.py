@@ -3,7 +3,7 @@ import cv2
 import numba as nb
 import gdown
 import streamlit as st
-import plotly.express as px  # For interactive pan/zoom
+import plotly.graph_objects as go  # For interactive pan/zoom
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
@@ -115,14 +115,15 @@ if uploaded:
         if che_do == "3D" and sidebar.button("Xoay 3D"):
             out = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
             out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-            # Interactive display via Plotly Express
-            fig = px.imshow(out)
+            # Interactive display via Plotly Graph Objects
+            fig = go.Figure(go.Image(z=out))
             fig.update_layout(
-                dragmode='pan',
-                margin=dict(l=0, r=0, t=0, b=0)
+                width=400, height=400,
+                margin=dict(l=0, r=0, t=0, b=0),
+                dragmode='pan'
             )
             fig.update_xaxes(visible=False)
-            fig.update_yaxes(visible=False, autorange='reversed')
+            fig.update_yaxes(visible=False)
             st.subheader(f"3D: α={alpha}°, θ={theta}°, γ={gamma}°, Độ sáng={do_sang}")
             st.plotly_chart(fig, use_container_width=False)
 else:
