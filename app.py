@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 import numba as nb
 import gdown
-import streamlit as st  # <-- Added missing import
+import streamlit as st  # Added import
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
@@ -31,7 +31,7 @@ class ImageRotation:
 
     def rotate_image_2d(self, angle=0):
         """
-        Xoay 2D sử dụng OpenCV, mở rộng canvas để giữ nguyên trọn vẹn ảnh.
+        Rotate 2D using OpenCV, expand canvas to fit full image.
         """
         h, w = self.image.shape[:2]
         rad = np.deg2rad(angle)
@@ -84,7 +84,7 @@ class ImageRotation:
 
     def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
         """
-        Xoay 3D bằng Givens và chiếu xuống 2D.
+        Rotate 3D with Givens and project to 2D.
         """
         a, t, g = np.deg2rad([alpha, theta, gamma])
         rotated3d = self.givens_rotation_3d(a, t, g)
@@ -114,7 +114,9 @@ st.set_page_config(page_title="Image Rotation", layout="wide")
 st.title("🎨 Image Rotation with Givens Transform")
 
 mode = st.sidebar.radio("Rotation Mode", ["2D", "3D"])
-uploaded = st.file_uploader("Upload an image", type=None)  # Allow all types
+# Add brightness slider applicable to both modes
+brightness = st.sidebar.slider("Brightness", 0.1, 2.0, 1.0, 0.1)
+uploaded = st.file_uploader("Upload an image", type=None)
 
 if uploaded:
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
@@ -131,7 +133,9 @@ if uploaded:
             if st.sidebar.button("Rotate 2D"):
                 with st.spinner("Rotating 2D..."):
                     out2d = ImageRotation(img).rotate_image_2d(angle2d)
-                    st.subheader(f"2D Rotated (θ={angle2d}°)")
+                    # Apply brightness adjustment
+                    out2d = cv2.convertScaleAbs(out2d, alpha=brightness, beta=0)
+                    st.subheader(f"2D Rotated (θ={angle2d}°, brightness={brightness})")
                     st.image(out2d, use_column_width=True)
         else:
             alpha = st.sidebar.slider("Alpha (X-axis)", -90, 90, 0)
@@ -140,7 +144,9 @@ if uploaded:
             if st.sidebar.button("Rotate 3D"):
                 with st.spinner("Rotating 3D..."):
                     out3d = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
-                    st.subheader(f"3D Rotated (α={alpha}°, θ={theta}°, γ={gamma}°)")
+                    # Apply brightness adjustment
+                    out3d = cv2.convertScaleAbs(out3d, alpha=brightness, beta=0)
+                    st.subheader(f"3D Rotated (α={alpha}°, θ={theta}°, γ={gamma}°, brightness={brightness})")
                     st.image(out3d, use_column_width=True)
 else:
     st.info("Please upload an image to begin.")
