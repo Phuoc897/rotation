@@ -3,14 +3,15 @@ import cv2
 import numba as nb
 import gdown
 import streamlit as st
-import plotly.graph_objects as go  # For interactive pan/zoom
+import plotly.graph_objects as go
 
 # --------------------- Core Logic ---------------------
 class ImageRotation:
     def __init__(self, image: np.ndarray):
         self.image = image
         self.height, self.width = image.shape[:2]
-        x, y = np.meshgrid(range(self.height), range(self.width), indexing='ij')
+        # Sửa lỗi: tạo lưới tọa độ đúng
+        y, x = np.meshgrid(range(self.height), range(self.width), indexing='ij')
         z = np.zeros_like(x)
         self.pixels = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
 
@@ -26,7 +27,8 @@ class ImageRotation:
         return G
 
     def centering_image(self, pixels):
-        return pixels - np.mean(pixels, axis=0)
+        center = np.array([self.width/2, self.height/2, 0])
+        return pixels - center
 
     def rotate_image_2d(self, angle=0):
         h, w = self.image.shape[:2]
@@ -40,45 +42,104 @@ class ImageRotation:
         return cv2.warpAffine(self.image, M, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=(255,255,255))
 
     def givens_rotation_3d(self, a, t, g):
-        R_x = self.givens_matrix(0, 2, a)
-        R_y = self.givens_matrix(1, 2, t)
+        # Ma trận xoay quanh trục X (pitch)
+        R_x = self.givens_matrix(1, 2, a)
+        # Ma trận xoay quanh trục Y (yaw)
+        R_y = self.givens_matrix(0, 2, t)
+        # Ma trận xoay quanh trục Z (roll)
         R_z = self.givens_matrix(0, 1, g)
+        
         pts = self.centering_image(self.pixels)
-        return pts @ R_x @ R_y @ R_z
+        # Áp dụng các phép xoay theo thứ tự Z-Y-X
+        return pts @ R_z @ R_y @ R_x
 
     def initialize_projection(self, max_angle):
         d = max(self.height, self.width)
-        self.focal_length = d * 1.2 * (1 + max_angle/90)
-        cx, cy = self.height/2, self.width/2
-        self.camera_matrix = np.array([[self.focal_length,0,cx],[0,self.focal_length,cy],[0,0,1]], dtype=np.float32)
+        self.focal_length = d * 1.5 * (1 + max_angle/90)
+        cx, cy = self.width/2, self.height/2
+        self.camera_matrix = np.array([
+            [self.focal_length, 0, cx],
+            [0, self.focal_length, cy],
+            [0, 0, 1]
+        ], dtype=np.float32)
 
     def project_points(self, pts3d):
-        cam = pts3d.T + np.array([0,0,self.focal_length*1.5]).reshape(3,1)
-        x, y = cam[0]/cam[2], cam[1]/cam[2]
-        fx = self.camera_matrix[0,0]
-        u = fx*x + self.camera_matrix[0,2]
-        v = fx*y + self.camera_matrix[1,2]
-        pts2d = np.vstack((u, v)).T.astype(int)
-        return pts2d - pts2d.min(axis=0)
+        # Dịch chuyển các điểm về phía trước camera
+        cam = pts3d.copy()
+        cam[:, 2] += self.focal_length * 2
+        
+        # Lọc các điểm có z > 0 (trước camera)
+        valid_mask = cam[:, 2] > 0.1
+        cam = cam[valid_mask]
+        
+        if len(cam) == 0:
+            return np.array([]), valid_mask
+        
+        # Phép chiếu phối cảnh
+        x_proj = cam[:, 0] / cam[:, 2]
+        y_proj = cam[:, 1] / cam[:, 2]
+        
+        # Chuyển đổi sang tọa độ pixel
+        u = self.focal_length * x_proj + self.camera_matrix[0, 2]
+        v = self.focal_length * y_proj + self.camera_matrix[1, 2]
+        
+        pts2d = np.column_stack((u, v)).astype(int)
+        
+        # Dịch chuyển để đảm bảo tọa độ dương
+        if len(pts2d) > 0:
+            min_u, min_v = pts2d.min(axis=0)
+            if min_u < 0:
+                pts2d[:, 0] -= min_u
+            if min_v < 0:
+                pts2d[:, 1] -= min_v
+        
+        return pts2d, valid_mask
 
     def rotate_image_3d(self, alpha=0, theta=0, gamma=0):
+        # Chuyển đổi sang radian
         a, t, g = np.deg2rad([alpha, theta, gamma])
+        
+        # Áp dụng phép xoay 3D
         pts3d = self.givens_rotation_3d(a, t, g)
-        self.initialize_projection(max(abs(alpha), abs(theta), abs(gamma)))
-        pts2d = self.project_points(pts3d)
-        H, W = pts2d[:,0].max()+1, pts2d[:,1].max()+1
-        canvas = np.ones((H, W, (3 if self.image.ndim==3 else 1)), dtype=self.image.dtype)*255
-        return assign_pixels_nb(self.pixels, pts2d, self.image, canvas)
+        
+        # Khởi tạo thông số chiếu
+        max_angle = max(abs(alpha), abs(theta), abs(gamma))
+        self.initialize_projection(max_angle)
+        
+        # Chiếu xuống 2D
+        pts2d, valid_mask = self.project_points(pts3d)
+        
+        if len(pts2d) == 0:
+            # Trả về ảnh trắng nếu không có điểm hợp lệ
+            return np.ones_like(self.image) * 255
+        
+        # Tạo canvas đầu ra
+        H, W = pts2d[:, 1].max() + 1, pts2d[:, 0].max() + 1
+        H, W = max(H, 1), max(W, 1)  # Đảm bảo kích thước tối thiểu
+        
+        if self.image.ndim == 3:
+            canvas = np.ones((H, W, self.image.shape[2]), dtype=self.image.dtype) * 255
+        else:
+            canvas = np.ones((H, W), dtype=self.image.dtype) * 255
+        
+        # Gán pixel với mask hợp lệ
+        valid_pixels = self.pixels[valid_mask]
+        return assign_pixels_nb(valid_pixels, pts2d, self.image, canvas)
 
 @nb.njit(parallel=True)
 def assign_pixels_nb(pixels, pts2d, img, out):
-    for i in nb.prange(pixels.shape[0]):
-        x,y = pixels[i]
-        u,v = pts2d[i]
-        if img.ndim==3:
-            for c in range(img.shape[2]): out[u,v,c] = img[x,y,c]
-        else:
-            out[u,v] = img[x,y]
+    H, W = out.shape[:2]
+    for i in nb.prange(len(pixels)):
+        x, y = int(pixels[i][0]), int(pixels[i][1])
+        u, v = pts2d[i]
+        
+        # Kiểm tra giới hạn
+        if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and 0 <= u < W and 0 <= v < H:
+            if img.ndim == 3:
+                for c in range(img.shape[2]):
+                    out[v, u, c] = img[y, x, c]
+            else:
+                out[v, u] = img[y, x]
     return out
 
 # --------------------- Giao diện Streamlit ---------------------
@@ -88,51 +149,95 @@ st.title("🎨 Ứng dụng Xoay ảnh và Chỉnh sáng")
 sidebar = st.sidebar
 che_do = sidebar.radio("Chế độ xoay", ["2D", "3D"])
 do_sang = sidebar.slider("Độ sáng", 0.1, 2.0, 1.0, 0.1)
+
 if che_do == "2D":
     goc = sidebar.slider("Góc xoay (độ)", -180, 180, 0)
 else:
-    alpha = sidebar.slider("Alpha (trục X, °)", -90, 90, 0)
-    theta = sidebar.slider("Theta (trục Y, °)", -90, 90, 0)
-    gamma = sidebar.slider("Gamma (trục Z, °)", -90, 90, 0)
+    alpha = sidebar.slider("Alpha (xoay X - pitch, °)", -45, 45, 0)
+    theta = sidebar.slider("Theta (xoay Y - yaw, °)", -45, 45, 0)
+    gamma = sidebar.slider("Gamma (xoay Z - roll, °)", -45, 45, 0)
 
-uploaded = st.file_uploader("Tải ảnh lên", type=None)
+uploaded = st.file_uploader("Tải ảnh lên", type=['jpg', 'jpeg', 'png', 'bmp', 'tiff'])
+
 if uploaded:
+    # Đọc ảnh
     data = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    
     if img is None:
         st.error("Định dạng file không được hỗ trợ hoặc file bị lỗi.")
     else:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.ndim==3 else img
+        # Chuyển đổi màu sắc nếu cần
+        if img.ndim == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Hiển thị ảnh gốc
         st.subheader("Ảnh gốc")
         st.image(img, width=300)
-
-        if che_do == "2D" and sidebar.button("Xoay 2D"):
-            out = ImageRotation(img).rotate_image_2d(goc)
-            out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-            st.subheader(f"2D: Góc={goc}°, Độ sáng={do_sang}")
-            st.image(out, width=300)
-
-        if che_do == "3D" and sidebar.button("Xoay 3D"):
-            out = ImageRotation(img).rotate_image_3d(alpha, theta, gamma)
-            out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
-            # Interactive display via Plotly Graph Objects
-            fig = go.Figure(go.Image(z=out))
-            fig.update_layout(
-                width=400, height=400,
-                margin=dict(l=0, r=0, t=0, b=0),
-                dragmode='pan'
-            )
-            fig.update_xaxes(visible=False)
-            fig.update_yaxes(visible=False)
-            st.subheader(f"3D: α={alpha}°, θ={theta}°, γ={gamma}°, Độ sáng={do_sang}")
-            st.plotly_chart(fig, use_container_width=False)
+        
+        # Xử lý xoay ảnh
+        rotation = ImageRotation(img)
+        
+        if che_do == "2D":
+            if sidebar.button("Xoay 2D") or goc != 0:
+                try:
+                    out = rotation.rotate_image_2d(goc)
+                    out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
+                    st.subheader(f"Kết quả 2D: Góc={goc}°, Độ sáng={do_sang}")
+                    st.image(out, width=300)
+                except Exception as e:
+                    st.error(f"Lỗi xoay 2D: {str(e)}")
+        
+        else:  # 3D mode
+            if sidebar.button("Xoay 3D") or alpha != 0 or theta != 0 or gamma != 0:
+                try:
+                    with st.spinner("Đang xoay ảnh 3D..."):
+                        out = rotation.rotate_image_3d(alpha, theta, gamma)
+                        out = cv2.convertScaleAbs(out, alpha=do_sang, beta=0)
+                        
+                        st.subheader(f"Kết quả 3D: α={alpha}°, θ={theta}°, γ={gamma}°, Độ sáng={do_sang}")
+                        
+                        # Hiển thị bằng st.image thay vì plotly để đảm bảo hoạt động
+                        st.image(out, width=400)
+                        
+                        # Tùy chọn: Thêm hiển thị plotly interactive
+                        if st.checkbox("Hiển thị interactive (Plotly)"):
+                            fig = go.Figure(go.Image(z=out))
+                            fig.update_layout(
+                                width=400, height=400,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                dragmode='pan',
+                                title="Ảnh 3D (có thể zoom/pan)"
+                            )
+                            fig.update_xaxes(visible=False)
+                            fig.update_yaxes(visible=False)
+                            st.plotly_chart(fig, use_container_width=False)
+                            
+                except Exception as e:
+                    st.error(f"Lỗi xoay 3D: {str(e)}")
+                    st.write("Chi tiết lỗi:", e)
 else:
     st.info("Vui lòng tải ảnh lên để bắt đầu.")
 
+# Phần tải ảnh mẫu
 with st.expander("Tải ảnh mẫu"):
-    if st.button("Tải qua gdown"):
-        samples = [("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE","sample1.jpg"),
-                   ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ","sample2.jpg")]
-        for gid, fname in samples:
-            gdown.download(f"https://drive.google.com/uc?id={gid}", fname, quiet=True)
-        st.success("Tải xong ảnh mẫu.")
+    if st.button("Tải ảnh mẫu qua Google Drive"):
+        try:
+            samples = [
+                ("1HQmRC6D5vKDwVjsVUbs5GBQ0x_2KjtNE", "sample1.jpg"),
+                ("1Acz81dy_j9kXV956N0_88gsEW8BQKVSQ", "sample2.jpg")
+            ]
+            for gid, fname in samples:
+                url = f"https://drive.google.com/uc?id={gid}"
+                gdown.download(url, fname, quiet=True)
+            st.success("Tải xong ảnh mẫu!")
+        except Exception as e:
+            st.error(f"Lỗi tải ảnh mẫu: {str(e)}")
+
+st.markdown("---")
+st.markdown("**Hướng dẫn sử dụng:**")
+st.markdown("- **2D**: Xoay ảnh theo góc đơn giản")
+st.markdown("- **3D**: Xoay ảnh theo 3 trục (X, Y, Z)")
+st.markdown("- **Alpha (X)**: Xoay lên/xuống (pitch)")
+st.markdown("- **Theta (Y)**: Xoay trái/phải (yaw)")  
+st.markdown("- **Gamma (Z)**: Xoay nghiêng (roll)")
