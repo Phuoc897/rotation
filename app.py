@@ -27,24 +27,26 @@ class ImageRotation:
 
     def centering_image(self, pixels):
         center = np.mean(pixels, axis=0)
-        return pixels - center
-
-    def rotate_image_2d(self, angle=0):
-        # Rotate in-plane using Givens on (x,y)
-        a = np.deg2rad(angle)
-        G = self.givens_matrix(0, 1, a)
-        pts_centered = self.centering_image(self.pixels)
-        rotated = pts_centered @ G
-        # Extract 2D coords, shift to positive
-        pts2d = rotated[:, :2]
-        pts2d -= pts2d.min(axis=0)
-        pts2d = pts2d.astype(int)
-        # Create canvas
-        h_out, w_out = pts2d[:,0].max()+1, pts2d[:,1].max()+1
-        channels = 3 if self.image.ndim == 3 else 1
-        canvas = np.ones((h_out, w_out, channels), dtype=self.image.dtype) * 255
-        # Map pixels
-        return assign_pixels_nb(self.pixels, pts2d, self.image, canvas)
+        return pixels - center    def rotate_image_2d(self, angle=0):
+        """
+        Xoay 2D sử dụng OpenCV để đảm bảo chất lượng tốt.
+        :param angle: góc xoay (độ)
+        :return: ảnh đã xoay giữ kích thước gốc
+        """
+        # Kích thước và tâm ảnh
+        (h, w) = self.image.shape[:2]
+        center = (w // 2, h // 2)
+        # Ma trận xoay
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        # Warp với interpolation tuyến tính và background trắng
+        rotated = cv2.warpAffine(
+            self.image,
+            M,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderValue=(255, 255, 255)
+        )
+        return rotated
 
     def givens_rotation_3d(self, alpha, theta, gamma):
         R_x = self.givens_matrix(0, 2, alpha)
